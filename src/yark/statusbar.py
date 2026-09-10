@@ -18,11 +18,14 @@ from AppKit import (
     NSEvent,
     NSEventMaskFlagsChanged,
     NSEventMaskKeyDown,
+    NSEventMaskKeyUp,
     NSEventModifierFlagCommand,
     NSEventModifierFlagControl,
     NSEventModifierFlagOption,
     NSEventModifierFlagShift,
     NSEventTypeFlagsChanged,
+    NSEventTypeKeyDown,
+    NSEventTypeKeyUp,
     NSFloatingWindowLevel,
     NSFont,
     NSImage,
@@ -30,9 +33,9 @@ from AppKit import (
     NSMakeRect,
     NSMenu,
     NSMenuItem,
-    NSPopUpButton,
     NSSquareStatusItemLength,
     NSStatusBar,
+    NSTextAlignmentCenter,
     NSTextField,
     NSVariableStatusItemLength,
     NSWindow,
@@ -45,23 +48,21 @@ from yark.app import DictationRuntime
 from yark.errors import ConfigError
 from yark.hotkey import (
     ESCAPE_KEYCODE,
-    HOTKEY_CHOICES,
-    hotkey_from_keycode,
+    format_chord,
     hotkey_label,
+    recording_token_from_keycode,
 )
 
 logger = logging.getLogger("yark.statusbar")
 
-_MODIFIER_FLAGS = {
-    "right_option": NSEventModifierFlagOption,
-    "left_option": NSEventModifierFlagOption,
-    "right_command": NSEventModifierFlagCommand,
-    "left_command": NSEventModifierFlagCommand,
-    "right_control": NSEventModifierFlagControl,
-    "left_control": NSEventModifierFlagControl,
-    "right_shift": NSEventModifierFlagShift,
-    "left_shift": NSEventModifierFlagShift,
+_FAMILY_FLAGS = {
+    "command": NSEventModifierFlagCommand,
+    "option": NSEventModifierFlagOption,
+    "control": NSEventModifierFlagControl,
+    "shift": NSEventModifierFlagShift,
 }
+
+_RECORD_MASK = NSEventMaskKeyDown | NSEventMaskKeyUp | NSEventMaskFlagsChanged
 
 
 class YarkAppDelegate(NSObject):
@@ -70,10 +71,11 @@ class YarkAppDelegate(NSObject):
     status_line = objc.ivar()
     shortcut_line = objc.ivar()
     settings_window = objc.ivar()
-    popup = objc.ivar()
+    shortcut_display = objc.ivar()
     record_button = objc.ivar()
     hint = objc.ivar()
-    monitor = objc.ivar()
+    local_monitor = objc.ivar()
+    global_monitor = objc.ivar()
     recording = objc.ivar()
     _listening = objc.ivar()
     _started = objc.ivar()
@@ -87,13 +89,16 @@ class YarkAppDelegate(NSObject):
         self.status_line = None
         self.shortcut_line = None
         self.settings_window = None
-        self.popup = None
+        self.shortcut_display = None
         self.record_button = None
         self.hint = None
-        self.monitor = None
+        self.local_monitor = None
+        self.global_monitor = None
         self.recording = False
         self._listening = False
         self._started = False
+        self._record_down: set[str] = set()
+        self._record_peak: set[str] = set()
         runtime.on_listening = self.setListening_
         return self
 
@@ -102,7 +107,7 @@ class YarkAppDelegate(NSObject):
             self.finishLaunch()
 
     def applicationWillTerminate_(self, notification) -> None:
-        self._stop_recording()
+        self._stop_recording(resume=False)
         self.runtime.shutdown()
 
     def settings_(self, sender) -> None:
@@ -110,32 +115,33 @@ class YarkAppDelegate(NSObject):
         window = self._settings_window()
         NSApp.activateIgnoringOtherApps_(True)
         window.makeKeyAndOrderFront_(None)
-        self._sync_popup()
+        self._sync_shortcut_display()
 
     def quit_(self, sender) -> None:
         NSApp.terminate_(None)
-
-    def shortcutPicked_(self, sender) -> None:
-        item = sender.selectedItem()
-        if item is None:
-            return
-        name = item.representedObject()
-        if name:
-            self._apply_hotkey(str(name))
 
     def recordShortcut_(self, sender) -> None:
         if self.recording:
             self._stop_recording()
             return
+        self.runtime.pause_hotkey()
         self.recording = True
-        self.record_button.setTitle_("Press a key… (Esc cancels)")
-        mask = NSEventMaskKeyDown | NSEventMaskFlagsChanged
+        self._record_down = set()
+        self._record_peak = set()
+        self.record_button.setTitle_("Hold keys, then release… (Esc cancels)")
+        self._update_record_preview()
 
-        def handler(event):
+        def local_handler(event):
             return self._on_record_event(event)
 
-        self.monitor = NSEvent.addLocalMonitorForEventsMatchingMask_handler_(
-            mask, handler
+        def global_handler(event):
+            self._on_record_event(event)
+
+        self.local_monitor = NSEvent.addLocalMonitorForEventsMatchingMask_handler_(
+            _RECORD_MASK, local_handler
+        )
+        self.global_monitor = NSEvent.addGlobalMonitorForEventsMatchingMask_handler_(
+            _RECORD_MASK, global_handler
         )
 
     def finishLaunch(self) -> None:
@@ -167,7 +173,7 @@ class YarkAppDelegate(NSObject):
             label = hotkey_label(self.runtime.hotkey)
             self.shortcut_line.setTitle_(f"Hold {label} to dictate")
             button.setToolTip_(f"yark — {status.lower()}. Hold {label} to dictate.")
-            self._sync_popup()
+            self._sync_shortcut_display()
 
         _on_main(apply)
 
@@ -214,7 +220,7 @@ class YarkAppDelegate(NSObject):
             return self.settings_window
 
         window = NSWindow.alloc().initWithContentRect_styleMask_backing_defer_(
-            NSMakeRect(0, 0, 380, 196),
+            NSMakeRect(0, 0, 380, 200),
             NSWindowStyleMaskTitled | NSWindowStyleMaskClosable,
             NSBackingStoreBuffered,
             False,
@@ -227,21 +233,18 @@ class YarkAppDelegate(NSObject):
         content = window.contentView()
         assert content is not None
 
-        title = _label("Hold-to-talk shortcut", NSMakeRect(20, 150, 340, 22), bold=True)
+        title = _label("Hold-to-talk shortcut", NSMakeRect(20, 154, 340, 22), bold=True)
         content.addSubview_(title)
 
-        popup = NSPopUpButton.alloc().initWithFrame_pullsDown_(
-            NSMakeRect(20, 114, 340, 28), False
-        )
-        for name, label in HOTKEY_CHOICES:
-            popup.addItemWithTitle_(label)
-            popup.lastItem().setRepresentedObject_(name)
-        popup.setTarget_(self)
-        popup.setAction_("shortcutPicked:")
-        content.addSubview_(popup)
+        display = NSTextField.alloc().initWithFrame_(NSMakeRect(20, 112, 340, 32))
+        display.setEditable_(False)
+        display.setBezeled_(True)
+        display.setAlignment_(NSTextAlignmentCenter)
+        display.setFont_(NSFont.systemFontOfSize_(16.0))
+        content.addSubview_(display)
 
-        record = NSButton.alloc().initWithFrame_(NSMakeRect(20, 72, 340, 32))
-        record.setTitle_("Click to record a new shortcut")
+        record = NSButton.alloc().initWithFrame_(NSMakeRect(20, 70, 340, 32))
+        record.setTitle_("Record shortcut")
         record.setBezelStyle_(NSBezelStyleRounded)
         record.setTarget_(self)
         record.setAction_("recordShortcut:")
@@ -254,35 +257,36 @@ class YarkAppDelegate(NSObject):
         content.addSubview_(hint)
 
         self.settings_window = window
-        self.popup = popup
+        self.shortcut_display = display
         self.record_button = record
         self.hint = hint
-        self._sync_popup()
+        self._sync_shortcut_display()
         return window
 
-    def _sync_popup(self) -> None:
-        if self.popup is None:
+    def _sync_shortcut_display(self) -> None:
+        if self.shortcut_display is None:
             return
-        current = self.runtime.hotkey
-        names = [name for name, _label in HOTKEY_CHOICES]
-        if current not in names:
-            self.popup.addItemWithTitle_(hotkey_label(current))
-            self.popup.lastItem().setRepresentedObject_(current)
-        index = 0
-        for i in range(self.popup.numberOfItems()):
-            item = self.popup.itemAtIndex_(i)
-            if item is not None and str(item.representedObject() or "") == current:
-                index = i
-                break
-        self.popup.selectItemAtIndex_(index)
+        if self.recording:
+            return
+        self.shortcut_display.setStringValue_(hotkey_label(self.runtime.hotkey))
 
-    def _apply_hotkey(self, name: str) -> None:
+    def _update_record_preview(self) -> None:
+        if self.shortcut_display is None:
+            return
+        current = self._record_down or self._record_peak
+        if current:
+            self.shortcut_display.setStringValue_(hotkey_label(format_chord(current)))
+        else:
+            self.shortcut_display.setStringValue_("Waiting for keys…")
+
+    def _apply_hotkey(self, name: str) -> bool:
         try:
             self.runtime.set_hotkey(name)
         except ConfigError as exc:
             logger.warning("cannot set shortcut: %s", exc)
-            return
+            return False
         self.setListening_(self._listening)
+        return True
 
     def _on_record_event(self, event):
         if not self.recording:
@@ -291,24 +295,52 @@ class YarkAppDelegate(NSObject):
         if code == ESCAPE_KEYCODE:
             self._stop_recording()
             return None
-        name = hotkey_from_keycode(code)
-        if name is None:
+        token = recording_token_from_keycode(code)
+        if token is None:
             return event
-        if int(event.type()) == int(NSEventTypeFlagsChanged):
-            mask = _MODIFIER_FLAGS.get(name)
-            if mask is not None and not (int(event.modifierFlags()) & int(mask)):
+
+        etype = int(event.type())
+        if etype == int(NSEventTypeFlagsChanged):
+            mask = _FAMILY_FLAGS.get(token)
+            is_down = True if mask is None else bool(int(event.modifierFlags()) & int(mask))
+        elif etype == int(NSEventTypeKeyDown):
+            is_down = True
+        elif etype == int(NSEventTypeKeyUp):
+            is_down = False
+        else:
+            return event
+
+        if is_down:
+            self._record_down.add(token)
+            if len(self._record_down) >= len(self._record_peak):
+                self._record_peak = set(self._record_down)
+            self._update_record_preview()
+        else:
+            self._record_down.discard(token)
+            self._update_record_preview()
+            if not self._record_down and self._record_peak:
+                spec = format_chord(self._record_peak)
+                ok = self._apply_hotkey(spec)
+                self._stop_recording(resume=not ok)
                 return None
-        self._apply_hotkey(name)
-        self._stop_recording()
         return None
 
-    def _stop_recording(self) -> None:
+    def _stop_recording(self, resume: bool = True) -> None:
+        was_recording = bool(self.recording)
         self.recording = False
-        if self.monitor is not None:
-            NSEvent.removeMonitor_(self.monitor)
-            self.monitor = None
+        self._record_down = set()
+        self._record_peak = set()
+        if self.local_monitor is not None:
+            NSEvent.removeMonitor_(self.local_monitor)
+            self.local_monitor = None
+        if self.global_monitor is not None:
+            NSEvent.removeMonitor_(self.global_monitor)
+            self.global_monitor = None
         if self.record_button is not None:
-            self.record_button.setTitle_("Click to record a new shortcut")
+            self.record_button.setTitle_("Record shortcut")
+        self._sync_shortcut_display()
+        if was_recording and resume:
+            self.runtime.resume_hotkey()
 
 
 def run_status_app(runtime: DictationRuntime) -> None:
@@ -350,7 +382,10 @@ def _label(text: str, frame, *, bold: bool = False) -> NSTextField:
 
 
 def _shortcut_hint() -> str:
-    hint = "Hold the key to dictate, release to stop. The shortcut is saved to config.toml."
+    hint = (
+        "Hold the shortcut to dictate, release to stop. "
+        "Record a chord such as ⌘ + ⌥. Saved to config.toml."
+    )
     if os.environ.get("YARK_HOTKEY"):
         hint += " YARK_HOTKEY is set and will override this on the next launch."
     return hint

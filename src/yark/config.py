@@ -214,6 +214,7 @@ chunk_ms = 200
 device = ""
 
 [input]
+# Examples: right_option, f8, command+option
 hotkey = "right_option"
 inject = "unicode"
 beep = true
@@ -239,7 +240,7 @@ def config_path_for_write(cfg: AppConfig) -> Path:
 
 def save_hotkey(path: Path, hotkey: str) -> Path:
     """Set `input.hotkey` in a TOML file, preserving comments when possible."""
-    if not re.fullmatch(r"[A-Za-z0-9_]+", hotkey):
+    if not re.fullmatch(r"[A-Za-z0-9_+]+", hotkey):
         raise ConfigError(f"invalid hotkey name {hotkey!r}")
     if not path.exists():
         write_example_config(path)

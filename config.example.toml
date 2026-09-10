@@ -28,7 +28,8 @@ chunk_ms = 200
 device = ""
 
 [input]
-# Hold-to-talk key. Examples: right_option, left_option, right_command, f8, f13
+# Hold-to-talk shortcut. Record in the menu-bar Settings panel.
+# Examples: right_option, f8, command+option
 hotkey = "right_option"
 # unicode = live keystrokes (Chinese-safe)
 # paste   = clipboard Cmd+V per committed phrase

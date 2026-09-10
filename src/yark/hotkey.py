@@ -1,8 +1,10 @@
-"""Hold-to-talk global hotkey."""
+"""Hold-to-talk global hotkey, including modifier chords."""
 
 from __future__ import annotations
 
-from collections.abc import Callable
+import re
+from collections.abc import Callable, Iterable
+from dataclasses import dataclass
 
 from pynput import keyboard
 
@@ -32,39 +34,49 @@ _KEYCODE_TO_NAME: dict[int, str] = {
 
 ESCAPE_KEYCODE = 0x35
 
-HOTKEY_CHOICES: tuple[tuple[str, str], ...] = (
-    ("right_option", "Right Option (⌥)"),
-    ("left_option", "Left Option (⌥)"),
-    ("right_command", "Right Command (⌘)"),
-    ("left_command", "Left Command (⌘)"),
-    ("right_control", "Right Control (⌃)"),
-    ("left_control", "Left Control (⌃)"),
-    ("f8", "F8"),
-    ("f9", "F9"),
-    ("f13", "F13"),
-    ("f14", "F14"),
-    ("f15", "F15"),
-    ("f16", "F16"),
-    ("f17", "F17"),
-    ("f18", "F18"),
-    ("f19", "F19"),
-)
+_ALIASES = {
+    "cmd": "command",
+    "alt": "option",
+    "opt": "option",
+    "ctrl": "control",
+}
 
-_LABELS: dict[str, str] = dict(HOTKEY_CHOICES)
-_LABELS.update(
-    {
-        "option": "Option (⌥)",
-        "alt": "Option (⌥)",
-        "command": "Command (⌘)",
-        "cmd": "Command (⌘)",
-        "control": "Control (⌃)",
-        "ctrl": "Control (⌃)",
-        "shift": "Shift (⇧)",
-        "right_shift": "Right Shift (⇧)",
-        "left_shift": "Left Shift (⇧)",
-        "space": "Space",
-    }
-)
+_FAMILY = {
+    "command": "command",
+    "cmd": "command",
+    "left_command": "command",
+    "right_command": "command",
+    "option": "option",
+    "alt": "option",
+    "opt": "option",
+    "left_option": "option",
+    "right_option": "option",
+    "control": "control",
+    "ctrl": "control",
+    "left_control": "control",
+    "right_control": "control",
+    "shift": "shift",
+    "left_shift": "shift",
+    "right_shift": "shift",
+}
+
+_MOD_RANK = {"command": 0, "option": 1, "control": 2, "shift": 3}
+
+_SYMBOLS = {
+    "command": "⌘",
+    "option": "⌥",
+    "control": "⌃",
+    "shift": "⇧",
+    "right_option": "Right ⌥",
+    "left_option": "Left ⌥",
+    "right_command": "Right ⌘",
+    "left_command": "Left ⌘",
+    "right_control": "Right ⌃",
+    "left_control": "Left ⌃",
+    "right_shift": "Right ⇧",
+    "left_shift": "Left ⇧",
+    "space": "Space",
+}
 
 _NAMED_KEYS: dict[str, keyboard.Key] = {
     "right_option": keyboard.Key.alt_r,
@@ -94,37 +106,123 @@ _NAMED_KEYS: dict[str, keyboard.Key] = {
     "f19": keyboard.Key.f19,
 }
 
+_FAMILIES: dict[str, frozenset] = {
+    "command": frozenset(
+        {keyboard.Key.cmd, keyboard.Key.cmd_l, keyboard.Key.cmd_r}
+    ),
+    "option": frozenset({keyboard.Key.alt, keyboard.Key.alt_l, keyboard.Key.alt_r}),
+    "control": frozenset(
+        {keyboard.Key.ctrl, keyboard.Key.ctrl_l, keyboard.Key.ctrl_r}
+    ),
+    "shift": frozenset(
+        {keyboard.Key.shift, keyboard.Key.shift_l, keyboard.Key.shift_r}
+    ),
+}
+
 
 def normalize_hotkey_name(name: str) -> str:
     return name.strip().lower().replace("-", "_").replace(" ", "_")
 
 
-def hotkey_label(name: str) -> str:
+def canonicalize_part(name: str) -> str:
     key = normalize_hotkey_name(name)
-    return _LABELS.get(key, name)
+    key = _ALIASES.get(key, key)
+    return _FAMILY.get(key, key)
+
+
+def recording_token_from_keycode(code: int) -> str | None:
+    name = hotkey_from_keycode(code)
+    if name is None:
+        return None
+    return canonicalize_part(name)
 
 
 def hotkey_from_keycode(code: int) -> str | None:
     return _KEYCODE_TO_NAME.get(int(code))
 
 
-def resolve_hotkey(name: str):
-    key = normalize_hotkey_name(name)
-    if key == "fn":
-        raise ConfigError(
-            "fn is not a reliable hotkey; use right_option, right_command, f8, or f13"
-        )
-    if key in _NAMED_KEYS:
-        return _NAMED_KEYS[key]
-    if len(key) == 1:
-        return keyboard.KeyCode.from_char(key)
-    raise ConfigError(
-        f"unknown hotkey {name!r}. Try right_option, right_command, f8, or f13"
-    )
+def format_chord(parts: Iterable[str]) -> str:
+    return parse_hotkey("+".join(parts)).spec()
+
+
+@dataclass(frozen=True)
+class HotkeyChord:
+    parts: tuple[str, ...]
+
+    def spec(self) -> str:
+        return "+".join(self.parts)
+
+    def label(self) -> str:
+        bits = []
+        for part in self.parts:
+            if part in _SYMBOLS:
+                bits.append(_SYMBOLS[part])
+            elif part in _NAMED_KEYS and part.startswith("f") and part[1:].isdigit():
+                bits.append(part.upper())
+            elif len(part) == 1:
+                bits.append(part.upper())
+            else:
+                bits.append(part.replace("_", " ").title())
+        return " + ".join(bits)
+
+    def matches(self, pressed: set) -> bool:
+        if not self.parts:
+            return False
+        return all(not pressed.isdisjoint(_keys_for_part(part)) for part in self.parts)
+
+
+def parse_hotkey(spec: str) -> HotkeyChord:
+    raw = [normalize_hotkey_name(p) for p in re.split(r"[+\s]+", spec.strip()) if p]
+    if not raw:
+        raise ConfigError("empty shortcut")
+    parts = [_ALIASES.get(p, p) for p in raw]
+    for part in parts:
+        if part == "fn":
+            raise ConfigError(
+                "fn is not a reliable hotkey; record Command+Option, F8, or similar"
+            )
+        if part not in _NAMED_KEYS and part not in _FAMILIES and len(part) != 1:
+            raise ConfigError(f"unknown hotkey part {part!r} in {spec!r}")
+    unique = list(dict.fromkeys(parts))
+    unique.sort(key=lambda p: (_MOD_RANK.get(p, 100), p))
+    return HotkeyChord(tuple(unique))
+
+
+def hotkey_label(name: str) -> str:
+    try:
+        return parse_hotkey(name).label()
+    except ConfigError:
+        return name
+
+
+def resolve_hotkey(name: str) -> HotkeyChord:
+    return parse_hotkey(name)
+
+
+def _keys_for_part(part: str) -> frozenset:
+    if part in _FAMILIES:
+        return _FAMILIES[part]
+    if part in _NAMED_KEYS:
+        key = _NAMED_KEYS[part]
+        for family in _FAMILIES.values():
+            if key in family:
+                return frozenset({key})
+        return frozenset({key})
+    if len(part) == 1:
+        return frozenset({keyboard.KeyCode.from_char(part)})
+    return frozenset()
+
+
+def _forget_key(pressed: set, key) -> None:
+    pressed.discard(key)
+    for family in _FAMILIES.values():
+        if key in family:
+            pressed.difference_update(family)
+            return
 
 
 class HoldListener:
-    """Restartable hold-to-talk listener."""
+    """Restartable hold-to-talk listener. Supports chords such as command+option."""
 
     def __init__(
         self,
@@ -138,19 +236,25 @@ class HoldListener:
 
     def start(self, hotkey_name: str) -> None:
         self.stop()
-        target = resolve_hotkey(hotkey_name)
+        chord = parse_hotkey(hotkey_name)
+        pressed: set = set()
+
+        def _sync() -> None:
+            active = chord.matches(pressed)
+            if active and not self._held:
+                self._held = True
+                self._on_press()
+            elif not active and self._held:
+                self._held = False
+                self._on_release()
 
         def _press(key) -> None:
-            if self._held or key != target:
-                return
-            self._held = True
-            self._on_press()
+            pressed.add(key)
+            _sync()
 
         def _release(key) -> None:
-            if not self._held or key != target:
-                return
-            self._held = False
-            self._on_release()
+            _forget_key(pressed, key)
+            _sync()
 
         self._listener = keyboard.Listener(on_press=_press, on_release=_release)
         self._listener.start()

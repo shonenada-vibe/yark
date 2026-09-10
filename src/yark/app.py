@@ -45,15 +45,22 @@ class DictationRuntime:
         logger.info("hold %s to dictate", self.hotkey)
 
     def set_hotkey(self, name: str) -> None:
-        resolve_hotkey(name)
-        path = save_hotkey(config_path_for_write(self.cfg), name)
+        chord = resolve_hotkey(name)
+        spec = chord.spec()
+        path = save_hotkey(config_path_for_write(self.cfg), spec)
         self.cfg = replace(
             self.cfg,
             path=path,
-            input=replace(self.cfg.input, hotkey=name),
+            input=replace(self.cfg.input, hotkey=spec),
         )
-        self._hold.restart(name)
-        logger.info("shortcut set to %s (%s)", name, hotkey_label(name))
+        self._hold.restart(spec)
+        logger.info("shortcut set to %s (%s)", spec, chord.label())
+
+    def pause_hotkey(self) -> None:
+        self._hold.stop()
+
+    def resume_hotkey(self) -> None:
+        self._hold.start(self.hotkey)
 
     def shutdown(self) -> None:
         self._hold.stop()

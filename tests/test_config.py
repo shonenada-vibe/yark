@@ -100,3 +100,11 @@ def test_save_hotkey_adds_input_section(tmp_path: Path):
 def test_save_hotkey_rejects_garbage():
     with pytest.raises(ConfigError):
         save_hotkey(Path("/tmp/unused.toml"), 'f8"\napi_key = "stolen')
+
+
+def test_save_hotkey_allows_chords(tmp_path: Path):
+    path = tmp_path / "config.toml"
+    path.write_text("[input]\nhotkey = \"f8\"\n", encoding="utf-8")
+    save_hotkey(path, "command+option")
+    text = path.read_text(encoding="utf-8")
+    assert 'hotkey = "command+option"' in text
