@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import re
 import tomllib
 from dataclasses import dataclass, field, replace
 from pathlib import Path
@@ -9,9 +10,10 @@ from yark.errors import ConfigError
 
 DEFAULT_ENDPOINT = "wss://openspeech.bytedance.com/api/v3/sauc/bigmodel_async"
 DEFAULT_RESOURCE_ID = "volc.seedasr.sauc.duration"
+USER_CONFIG_PATH = Path.home() / ".config" / "yark" / "config.toml"
 CONFIG_PATHS = (
     Path("config.toml"),
-    Path.home() / ".config" / "yark" / "config.toml",
+    USER_CONFIG_PATH,
 )
 
 
@@ -229,6 +231,35 @@ result_type = "single"
 def write_example_config(path: Path) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(_EXAMPLE_TOML, encoding="utf-8")
+
+
+def config_path_for_write(cfg: AppConfig) -> Path:
+    return cfg.path or USER_CONFIG_PATH
+
+
+def save_hotkey(path: Path, hotkey: str) -> Path:
+    """Set `input.hotkey` in a TOML file, preserving comments when possible."""
+    if not re.fullmatch(r"[A-Za-z0-9_]+", hotkey):
+        raise ConfigError(f"invalid hotkey name {hotkey!r}")
+    if not path.exists():
+        write_example_config(path)
+    text = path.read_text(encoding="utf-8")
+    path.write_text(_replace_toml_string(text, "hotkey", hotkey), encoding="utf-8")
+    return path
+
+
+def _replace_toml_string(text: str, key: str, value: str) -> str:
+    pattern = rf'(?m)^({re.escape(key)}\s*=\s*)(["\']).*?\2'
+    if re.search(pattern, text):
+        return re.sub(pattern, rf'\1"{value}"', text, count=1)
+    if re.search(r"(?m)^\[input\]\s*$", text):
+        return re.sub(
+            r"(?m)^(\[input\]\s*\n)",
+            rf'\1{key} = "{value}"\n',
+            text,
+            count=1,
+        )
+    return text.rstrip() + f'\n\n[input]\n{key} = "{value}"\n'
 
 
 def _read_toml(path: Path) -> dict:

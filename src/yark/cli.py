@@ -76,14 +76,14 @@ def _require_auth(cfg: AppConfig) -> None:
 def _cmd_listen(args) -> None:
     from dataclasses import replace
 
-    from yark.app import listen
+    from yark.app import run_listener
 
     cfg = _load(args)
     _require_auth(cfg)
     if args.hotkey:
         cfg = replace(cfg, input=replace(cfg.input, hotkey=args.hotkey))
     mode = "print" if args.print_only else cfg.input.inject
-    asyncio.run(listen(cfg, inject_mode=mode))
+    run_listener(cfg, inject_mode=mode)
 
 
 def _cmd_once(args) -> None:

@@ -1,13 +1,17 @@
-"""Hold-to-talk listener."""
+"""Hold-to-talk listener and macOS menu-bar runtime."""
 
 from __future__ import annotations
 
 import asyncio
 import logging
 import signal
+import sys
+import threading
+from collections.abc import Callable
+from dataclasses import replace
 
-from yark.config import AppConfig
-from yark.hotkey import start_hold_listener
+from yark.config import AppConfig, config_path_for_write, save_hotkey
+from yark.hotkey import HoldListener, hotkey_label, resolve_hotkey
 from yark.inject import beep, inject_text
 from yark.permissions import check_accessibility
 from yark.session import transcribe_until
@@ -15,82 +19,141 @@ from yark.session import transcribe_until
 logger = logging.getLogger("yark")
 
 
-async def listen(cfg: AppConfig, *, inject_mode: str | None = None) -> None:
-    mode = inject_mode or cfg.input.inject
-    if mode != "print" and not check_accessibility(prompt=True):
-        logger.warning(
-            "Accessibility permission is off. Grant it to this terminal in "
-            "System Settings → Privacy & Security → Accessibility, then rerun."
+class DictationRuntime:
+    """Hotkey + dictation sessions. Cocoa talks to this; no AppKit here."""
+
+    def __init__(self, cfg: AppConfig, inject_mode: str, loop: asyncio.AbstractEventLoop):
+        self.cfg = cfg
+        self.mode = inject_mode
+        self.loop = loop
+        self.on_listening: Callable[[bool], None] = lambda _listening: None
+        self._stop: asyncio.Event | None = None
+        self._task: asyncio.Task | None = None
+        self._hold = HoldListener(self._on_press, self._on_release)
+
+    @property
+    def hotkey(self) -> str:
+        return self.cfg.input.hotkey
+
+    def start(self) -> None:
+        if self.mode != "print" and not check_accessibility(prompt=True):
+            logger.warning(
+                "Accessibility permission is off. Grant it to this terminal in "
+                "System Settings → Privacy & Security → Accessibility, then rerun."
+            )
+        self._hold.start(self.hotkey)
+        logger.info("hold %s to dictate", self.hotkey)
+
+    def set_hotkey(self, name: str) -> None:
+        resolve_hotkey(name)
+        path = save_hotkey(config_path_for_write(self.cfg), name)
+        self.cfg = replace(
+            self.cfg,
+            path=path,
+            input=replace(self.cfg.input, hotkey=name),
         )
+        self._hold.restart(name)
+        logger.info("shortcut set to %s (%s)", name, hotkey_label(name))
 
-    loop = asyncio.get_running_loop()
-    stop_listen = asyncio.Event()
-    session_stop: asyncio.Event | None = None
-    session_task: asyncio.Task | None = None
+    def shutdown(self) -> None:
+        self._hold.stop()
 
-    def _start_session() -> None:
-        nonlocal session_stop, session_task
-        if session_task is not None and not session_task.done():
+        async def join() -> None:
+            if self._stop is not None and not self._stop.is_set():
+                self._stop.set()
+            task = self._task
+            if task is not None and not task.done():
+                try:
+                    await asyncio.wait_for(task, timeout=8)
+                except Exception:
+                    task.cancel()
+
+        try:
+            if self.loop.is_running():
+                fut = asyncio.run_coroutine_threadsafe(join(), self.loop)
+                fut.result(timeout=9)
+        except Exception:
+            logger.debug("session did not finish on shutdown", exc_info=True)
+        self._set_listening(False)
+
+    def _on_press(self) -> None:
+        self.loop.call_soon_threadsafe(self._start_session)
+
+    def _on_release(self) -> None:
+        self.loop.call_soon_threadsafe(self._stop_session)
+
+    def _start_session(self) -> None:
+        if self._task is not None and not self._task.done():
             return
-        logger.info("listening (release %s to stop)", cfg.input.hotkey)
-        if cfg.input.beep:
+        logger.info("listening (release %s to stop)", self.hotkey)
+        if self.cfg.input.beep:
             beep()
-        session_stop = asyncio.Event()
-        session_task = loop.create_task(
-            _run_session(cfg, session_stop, mode), name="yark-session"
-        )
+        self._stop = asyncio.Event()
+        self._set_listening(True)
+        self._task = self.loop.create_task(self._run_session(), name="yark-session")
 
-    def _stop_session() -> None:
-        if session_stop is not None and not session_stop.is_set():
+    def _stop_session(self) -> None:
+        if self._stop is not None and not self._stop.is_set():
             logger.info("stopping")
-            session_stop.set()
+            self._stop.set()
 
-    def _on_press() -> None:
-        loop.call_soon_threadsafe(_start_session)
+    async def _run_session(self) -> None:
+        assert self._stop is not None
+        try:
+            async for piece in transcribe_until(self.cfg, self._stop):
+                inject_text(piece, self.mode)
+            if self.mode == "print":
+                print(flush=True)
+            if self.cfg.input.beep:
+                beep()
+        except Exception:
+            logger.exception("dictation session failed")
+            if self.cfg.input.beep:
+                beep()
+        finally:
+            self._set_listening(False)
 
-    def _on_release() -> None:
-        loop.call_soon_threadsafe(_stop_session)
+    def _set_listening(self, listening: bool) -> None:
+        try:
+            self.on_listening(listening)
+        except Exception:
+            logger.debug("on_listening failed", exc_info=True)
 
-    listener = start_hold_listener(
-        cfg.input.hotkey, on_press=_on_press, on_release=_on_release
-    )
+
+def run_listener(cfg: AppConfig, *, inject_mode: str | None = None) -> None:
+    mode = inject_mode or cfg.input.inject
+    loop = asyncio.new_event_loop()
+    thread = threading.Thread(target=loop.run_forever, daemon=True, name="yark-asyncio")
+    thread.start()
+    runtime = DictationRuntime(cfg, mode, loop)
+    try:
+        if sys.platform == "darwin":
+            from yark.statusbar import run_status_app
+
+            run_status_app(runtime)
+        else:
+            _run_headless(runtime)
+    finally:
+        runtime.shutdown()
+        loop.call_soon_threadsafe(loop.stop)
+        thread.join(timeout=2)
+
+
+def _run_headless(runtime: DictationRuntime) -> None:
+    runtime.start()
     print(
-        f"yark is running. Hold {cfg.input.hotkey} to dictate, Ctrl+C to quit.",
+        f"yark is running. Hold {runtime.hotkey} to dictate, Ctrl+C to quit.",
         flush=True,
     )
+    stop = threading.Event()
 
-    def _sigint() -> None:
-        stop_listen.set()
+    def _sigint(*_args) -> None:
+        stop.set()
 
+    signal.signal(signal.SIGINT, _sigint)
+    signal.signal(signal.SIGTERM, _sigint)
     try:
-        loop.add_signal_handler(signal.SIGINT, _sigint)
-        loop.add_signal_handler(signal.SIGTERM, _sigint)
-    except NotImplementedError:
-        pass
-
-    try:
-        await stop_listen.wait()
+        while not stop.wait(0.25):
+            pass
     finally:
-        if session_stop is not None:
-            session_stop.set()
-        if session_task is not None:
-            try:
-                await asyncio.wait_for(session_task, timeout=8)
-            except (asyncio.TimeoutError, Exception):
-                session_task.cancel()
-        listener.stop()
         print("\nyark stopped.", flush=True)
-
-
-async def _run_session(cfg: AppConfig, stop: asyncio.Event, mode: str) -> None:
-    try:
-        async for piece in transcribe_until(cfg, stop):
-            inject_text(piece, mode)
-        if mode == "print":
-            print(flush=True)
-        if cfg.input.beep:
-            beep()
-    except Exception:
-        logger.exception("dictation session failed")
-        if cfg.input.beep:
-            beep()

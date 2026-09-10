@@ -42,18 +42,20 @@ yark doctor
 yark listen
 ```
 
-Hold **Right Option** (default) to dictate, release to stop. Ctrl+C quits.
+`yark listen` puts a mic icon in the macOS menu bar. Hold **Right Option** (default) to dictate, release to stop. Click the icon → **Settings…** to change the shortcut (dropdown or press a key). Quit from the menu, or Ctrl+C.
 
 ## Commands
 
 ```bash
-yark listen                 # hold-to-talk, type into the focused app
+yark listen                 # menu bar + hold-to-talk
 yark listen --print         # same, but print instead of typing
 yark listen --hotkey f8
 yark once --print           # record until Enter
 yark doctor
 yark init-config
 ```
+
+The menu bar extra shows Ready vs Listening. **Settings…** (or ⌘,) opens a panel to pick or record the hold-to-talk key; the choice is written to `config.toml`.
 
 Environment overrides: `YARK_VOLC_API_KEY`, `YARK_VOLC_RESOURCE_ID`, `YARK_VOLC_ENDPOINT`, `YARK_HOTKEY`, `YARK_INJECT`.
 
