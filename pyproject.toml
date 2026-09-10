@@ -1,0 +1,32 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "yark"
+version = "0.1.0"
+description = "macOS voice-to-text input powered by Volcengine streaming ASR"
+readme = "README.md"
+requires-python = ">=3.11"
+license = { text = "MIT" }
+authors = [{ name = "yark" }]
+dependencies = [
+  "websockets>=12.0",
+  "sounddevice>=0.5.0",
+  "numpy>=1.26.0",
+  "pynput>=1.7.7",
+  "pyobjc-framework-Cocoa>=10.0",
+  "pyobjc-framework-Quartz>=10.0",
+  "pyobjc-framework-ApplicationServices>=10.0",
+  "pyobjc-framework-AVFoundation>=10.0",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=8.0"]
+
+[project.scripts]
+yark = "yark.cli:main"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src"]
