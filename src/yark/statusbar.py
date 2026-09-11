@@ -480,14 +480,6 @@ class YarkAppDelegate(NSObject):
         shortcut_item.setView_(self._build_shortcut_tab())
         tabs.addTabViewItem_(shortcut_item)
 
-        refine_item = NSTabViewItem.alloc().initWithIdentifier_("refine")
-        refine_item.setLabel_("Refine")
-        refine_view, self.refine_enable, self.refine_key_field, self.refine_prompt_view = (
-            self._build_feature_tab("Enable refine", "refineToggle:")
-        )
-        refine_item.setView_(refine_view)
-        tabs.addTabViewItem_(refine_item)
-
         translate_item = NSTabViewItem.alloc().initWithIdentifier_("translate")
         translate_item.setLabel_("Translate")
         translate_view, self.translate_enable, self.translate_key_field, self.translate_prompt_view = (
@@ -495,6 +487,14 @@ class YarkAppDelegate(NSObject):
         )
         translate_item.setView_(translate_view)
         tabs.addTabViewItem_(translate_item)
+
+        refine_item = NSTabViewItem.alloc().initWithIdentifier_("refine")
+        refine_item.setLabel_("Refine")
+        refine_view, self.refine_enable, self.refine_key_field, self.refine_prompt_view = (
+            self._build_feature_tab("Enable refine", "refineToggle:")
+        )
+        refine_item.setView_(refine_view)
+        tabs.addTabViewItem_(refine_item)
 
         content.addSubview_(tabs)
 
