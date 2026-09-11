@@ -1,6 +1,12 @@
 from pathlib import Path
 
-from yark.config import load_config, save_hotkey
+from yark.config import (
+    LlmConfig,
+    LlmFeatureConfig,
+    load_config,
+    save_hotkey,
+    save_llm_config,
+)
 from yark.errors import ConfigError
 import pytest
 
@@ -108,3 +114,60 @@ def test_save_hotkey_allows_chords(tmp_path: Path):
     save_hotkey(path, "command+option")
     text = path.read_text(encoding="utf-8")
     assert 'hotkey = "command+option"' in text
+
+
+def test_load_llm_section(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    for key in ("YARK_LLM_API_KEY", "OPENAI_API_KEY", "YARK_LLM_BASE_URL", "OPENAI_BASE_URL"):
+        monkeypatch.delenv(key, raising=False)
+    path = tmp_path / "config.toml"
+    path.write_text(
+        """
+[llm]
+base_url = "http://127.0.0.1:11434/v1"
+model = "local-model"
+api_key = "shared-key"
+
+[llm.refine]
+enabled = true
+api_key = "refine-key"
+prompt = "clean it"
+
+[llm.translate]
+enabled = false
+prompt = "to french"
+""",
+        encoding="utf-8",
+    )
+    cfg = load_config(path)
+    assert cfg.llm.base_url == "http://127.0.0.1:11434/v1"
+    assert cfg.llm.model == "local-model"
+    assert cfg.llm.api_key == "shared-key"
+    assert cfg.llm.refine.enabled is True
+    assert cfg.llm.refine.api_key == "refine-key"
+    assert cfg.llm.refine.prompt == "clean it"
+    assert cfg.llm.translate.enabled is False
+    assert cfg.llm.translate.prompt == "to french"
+    assert cfg.llm.feature_key(cfg.llm.refine) == "refine-key"
+    assert cfg.llm.feature_key(cfg.llm.translate) == "shared-key"
+
+
+def test_save_llm_config_roundtrip(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    for key in ("YARK_LLM_API_KEY", "OPENAI_API_KEY"):
+        monkeypatch.delenv(key, raising=False)
+    path = tmp_path / "config.toml"
+    path.write_text("[input]\nhotkey = \"f8\"\n", encoding="utf-8")
+    llm = LlmConfig(
+        base_url="https://example.com/v1",
+        model="gpt-test",
+        api_key="sk-1",
+        refine=LlmFeatureConfig(enabled=True, api_key="sk-r", prompt="fix words"),
+        translate=LlmFeatureConfig(enabled=True, api_key="", prompt="to en"),
+    )
+    save_llm_config(path, llm)
+    cfg = load_config(path)
+    assert cfg.input.hotkey == "f8"
+    assert cfg.llm.base_url == "https://example.com/v1"
+    assert cfg.llm.refine.enabled is True
+    assert cfg.llm.refine.prompt == "fix words"
+    assert cfg.llm.translate.enabled is True
+    assert cfg.llm.translate.prompt == "to en"

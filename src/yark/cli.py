@@ -106,12 +106,26 @@ async def _once(cfg: AppConfig, mode: str) -> None:
     waiter = asyncio.create_task(wait_enter())
     texts: list[str] = []
     try:
+        from yark.llm import LlmPipeline
+
+        pipeline = LlmPipeline(cfg.llm)
+        buffered: list[str] = []
         async for piece in transcribe_until(cfg, stop):
-            texts.append(piece)
-            if mode == "print":
-                print(piece, end="", flush=True)
+            if pipeline.enabled():
+                buffered.append(piece)
             else:
-                inject_text(piece, mode)
+                texts.append(piece)
+                if mode == "print":
+                    print(piece, end="", flush=True)
+                else:
+                    inject_text(piece, mode)
+        if buffered:
+            text = pipeline.apply("".join(buffered))
+            texts.append(text)
+            if mode == "print":
+                print(text, end="", flush=True)
+            else:
+                inject_text(text, mode)
     finally:
         stop.set()
         waiter.cancel()
@@ -129,6 +143,10 @@ def _cmd_doctor(args) -> None:
     print(f"endpoint: {cfg.volcengine.endpoint}")
     print(f"hotkey: {cfg.input.hotkey}")
     print(f"inject: {cfg.input.inject}")
+    print(
+        f"llm: model={cfg.llm.model} refine={'on' if cfg.llm.refine.enabled else 'off'} "
+        f"translate={'on' if cfg.llm.translate.enabled else 'off'}"
+    )
     try:
         cfg.volcengine.auth_headers("doctor")
         print("auth: ok")

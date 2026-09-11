@@ -8,7 +8,8 @@ First version talks to [Volcengine bidirectional streaming ASR](https://docs.vol
 
 1. Captures 16 kHz / 16-bit / mono PCM from the microphone.
 2. Streams 200 ms packets over WebSocket to Volcengine (gzip + SAUC binary protocol).
-3. Commits each definite utterance as it arrives and inserts it at the caret.
+3. Optionally refines and/or translates the transcript via an OpenAI-compatible Chat Completions API.
+4. Inserts the result at the caret.
 
 ## Setup
 
@@ -55,9 +56,15 @@ yark doctor
 yark init-config
 ```
 
-The menu bar extra shows Ready vs Listening. **Settings…** (or ⌘,) opens a panel whose main control is **Record shortcut**: hold a key or a chord (including **Command + Option**), then release. The choice is written to `config.toml` as `command+option`, `f8`, and so on.
+The menu bar extra shows Ready vs Listening. **Settings…** (or ⌘,) has three tabs:
 
-Environment overrides: `YARK_VOLC_API_KEY`, `YARK_VOLC_RESOURCE_ID`, `YARK_VOLC_ENDPOINT`, `YARK_HOTKEY`, `YARK_INJECT`.
+- **Shortcut** — record a hold-to-talk key or chord (including **⌘ + ⌥**)
+- **Refine** — enable, API key, prompt (clean up ASR text before typing)
+- **Translate** — enable, API key, prompt (run after refine)
+
+Shared **Base URL**, **Model**, and fallback **API key** sit above the tabs. Any OpenAI-compatible `/v1/chat/completions` endpoint works. When either feature is on, yark waits until you release the hotkey, then post-processes the full transcript and types once.
+
+Environment overrides: `YARK_VOLC_API_KEY`, `YARK_VOLC_RESOURCE_ID`, `YARK_VOLC_ENDPOINT`, `YARK_HOTKEY`, `YARK_INJECT`, `YARK_LLM_API_KEY`, `YARK_LLM_BASE_URL`, `YARK_LLM_MODEL`.
 
 ## Inject modes
 

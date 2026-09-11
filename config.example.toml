@@ -44,3 +44,20 @@ enable_ddc = true
 show_utterances = true
 end_window_size = 800
 result_type = "single"
+
+[llm]
+# OpenAI-compatible Chat Completions (OpenAI, Groq, Together, local vLLM, …)
+base_url = "https://api.openai.com/v1"
+model = "gpt-4o-mini"
+api_key = ""
+timeout = 20.0
+
+[llm.refine]
+enabled = false
+api_key = ""
+prompt = "You clean up a speech-to-text transcript. Fix recognition mistakes, remove filler (um, uh, 那个, 就是), and keep the speaker's meaning and language. Do not add information. Output only the cleaned text."
+
+[llm.translate]
+enabled = false
+api_key = ""
+prompt = "Translate the text to English. Keep names, numbers, and code unchanged. Output only the translation, with no quotes or notes."

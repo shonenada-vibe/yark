@@ -10,6 +10,17 @@ from yark.errors import ConfigError
 
 DEFAULT_ENDPOINT = "wss://openspeech.bytedance.com/api/v3/sauc/bigmodel_async"
 DEFAULT_RESOURCE_ID = "volc.seedasr.sauc.duration"
+DEFAULT_LLM_BASE_URL = "https://api.openai.com/v1"
+DEFAULT_LLM_MODEL = "gpt-4o-mini"
+DEFAULT_REFINE_PROMPT = (
+    "You clean up a speech-to-text transcript. Fix recognition mistakes, "
+    "remove filler (um, uh, 那个, 就是), and keep the speaker's meaning and language. "
+    "Do not add information. Output only the cleaned text."
+)
+DEFAULT_TRANSLATE_PROMPT = (
+    "Translate the text to English. Keep names, numbers, and code unchanged. "
+    "Output only the translation, with no quotes or notes."
+)
 USER_CONFIG_PATH = Path.home() / ".config" / "yark" / "config.toml"
 CONFIG_PATHS = (
     Path("config.toml"),
@@ -90,11 +101,36 @@ class SttConfig:
 
 
 @dataclass(frozen=True)
+class LlmFeatureConfig:
+    enabled: bool = False
+    api_key: str = ""
+    prompt: str = ""
+
+
+@dataclass(frozen=True)
+class LlmConfig:
+    base_url: str = DEFAULT_LLM_BASE_URL
+    model: str = DEFAULT_LLM_MODEL
+    api_key: str = ""
+    timeout: float = 20.0
+    refine: LlmFeatureConfig = field(
+        default_factory=lambda: LlmFeatureConfig(prompt=DEFAULT_REFINE_PROMPT)
+    )
+    translate: LlmFeatureConfig = field(
+        default_factory=lambda: LlmFeatureConfig(prompt=DEFAULT_TRANSLATE_PROMPT)
+    )
+
+    def feature_key(self, feature: LlmFeatureConfig) -> str:
+        return feature.api_key or self.api_key
+
+
+@dataclass(frozen=True)
 class AppConfig:
     volcengine: VolcengineConfig = field(default_factory=VolcengineConfig)
     audio: AudioConfig = field(default_factory=AudioConfig)
     input: InputConfig = field(default_factory=InputConfig)
     stt: SttConfig = field(default_factory=SttConfig)
+    llm: LlmConfig = field(default_factory=LlmConfig)
     path: Path | None = None
 
 
@@ -114,6 +150,9 @@ def load_config(path: Path | None = None) -> AppConfig:
     audio = data.get("audio") or {}
     inp = data.get("input") or {}
     stt = data.get("stt") or {}
+    llm_data = data.get("llm") or {}
+    refine = llm_data.get("refine") or {}
+    translate = llm_data.get("translate") or {}
 
     cfg = AppConfig(
         volcengine=VolcengineConfig(
@@ -141,9 +180,25 @@ def load_config(path: Path | None = None) -> AppConfig:
             end_window_size=int(stt.get("end_window_size") or 800),
             result_type=str(stt.get("result_type") or "single"),
         ),
+        llm=LlmConfig(
+            base_url=str(llm_data.get("base_url") or DEFAULT_LLM_BASE_URL),
+            model=str(llm_data.get("model") or DEFAULT_LLM_MODEL),
+            api_key=str(llm_data.get("api_key") or ""),
+            timeout=float(llm_data.get("timeout") or 20),
+            refine=_feature_from_table(refine, DEFAULT_REFINE_PROMPT),
+            translate=_feature_from_table(translate, DEFAULT_TRANSLATE_PROMPT),
+        ),
         path=used,
     )
     return _apply_env(cfg)
+
+
+def _feature_from_table(data: dict, default_prompt: str) -> LlmFeatureConfig:
+    return LlmFeatureConfig(
+        enabled=_bool(data.get("enabled"), False),
+        api_key=str(data.get("api_key") or ""),
+        prompt=str(data.get("prompt") or default_prompt),
+    )
 
 
 def _apply_env(cfg: AppConfig) -> AppConfig:
@@ -156,6 +211,9 @@ def _apply_env(cfg: AppConfig) -> AppConfig:
     endpoint = os.environ.get("YARK_VOLC_ENDPOINT")
     hotkey = os.environ.get("YARK_HOTKEY")
     inject = os.environ.get("YARK_INJECT")
+    llm_key = os.environ.get("YARK_LLM_API_KEY") or os.environ.get("OPENAI_API_KEY")
+    llm_base = os.environ.get("YARK_LLM_BASE_URL") or os.environ.get("OPENAI_BASE_URL")
+    llm_model = os.environ.get("YARK_LLM_MODEL")
 
     volc = cfg.volcengine
     updates = {}
@@ -181,7 +239,18 @@ def _apply_env(cfg: AppConfig) -> AppConfig:
     if inp_updates:
         inp = replace(inp, **inp_updates)
 
-    return replace(cfg, volcengine=volc, input=inp)
+    llm = cfg.llm
+    llm_updates = {}
+    if llm_key:
+        llm_updates["api_key"] = llm_key
+    if llm_base:
+        llm_updates["base_url"] = llm_base
+    if llm_model:
+        llm_updates["model"] = llm_model
+    if llm_updates:
+        llm = replace(llm, **llm_updates)
+
+    return replace(cfg, volcengine=volc, input=inp, llm=llm)
 
 
 _EXAMPLE_TOML = """\
@@ -226,6 +295,23 @@ enable_ddc = true
 show_utterances = true
 end_window_size = 800
 result_type = "single"
+
+[llm]
+# OpenAI-compatible Chat Completions endpoint ( Groq, Together, local vLLM, … )
+base_url = "https://api.openai.com/v1"
+model = "gpt-4o-mini"
+api_key = ""
+timeout = 20.0
+
+[llm.refine]
+enabled = false
+api_key = ""
+prompt = "You clean up a speech-to-text transcript. Fix recognition mistakes, remove filler (um, uh, 那个, 就是), and keep the speaker's meaning and language. Do not add information. Output only the cleaned text."
+
+[llm.translate]
+enabled = false
+api_key = ""
+prompt = "Translate the text to English. Keep names, numbers, and code unchanged. Output only the translation, with no quotes or notes."
 """
 
 
@@ -236,6 +322,40 @@ def write_example_config(path: Path) -> None:
 
 def config_path_for_write(cfg: AppConfig) -> Path:
     return cfg.path or USER_CONFIG_PATH
+
+
+def save_llm_config(path: Path, llm: LlmConfig) -> Path:
+    """Write the [llm] tables, creating the file if needed."""
+    import tomlkit
+
+    if not path.exists():
+        write_example_config(path)
+    doc = tomlkit.parse(path.read_text(encoding="utf-8"))
+    table = doc.get("llm")
+    if table is None or not hasattr(table, "items"):
+        table = tomlkit.table()
+        doc["llm"] = table
+    table["base_url"] = llm.base_url
+    table["model"] = llm.model
+    table["api_key"] = llm.api_key
+    table["timeout"] = llm.timeout
+    _write_feature_table(table, "refine", llm.refine)
+    _write_feature_table(table, "translate", llm.translate)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(tomlkit.dumps(doc), encoding="utf-8")
+    return path
+
+
+def _write_feature_table(parent, name: str, feature: LlmFeatureConfig) -> None:
+    import tomlkit
+
+    child = parent.get(name)
+    if child is None or not hasattr(child, "items"):
+        child = tomlkit.table()
+        parent[name] = child
+    child["enabled"] = bool(feature.enabled)
+    child["api_key"] = feature.api_key
+    child["prompt"] = feature.prompt
 
 
 def save_hotkey(path: Path, hotkey: str) -> Path:

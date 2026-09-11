@@ -10,9 +10,10 @@ import threading
 from collections.abc import Callable
 from dataclasses import replace
 
-from yark.config import AppConfig, config_path_for_write, save_hotkey
+from yark.config import AppConfig, LlmConfig, config_path_for_write, save_hotkey, save_llm_config
 from yark.hotkey import HoldListener, hotkey_label, resolve_hotkey
 from yark.inject import beep, inject_text
+from yark.llm import LlmPipeline
 from yark.permissions import check_accessibility
 from yark.session import transcribe_until
 
@@ -62,6 +63,16 @@ class DictationRuntime:
     def resume_hotkey(self) -> None:
         self._hold.start(self.hotkey)
 
+    def update_llm(self, llm: LlmConfig) -> None:
+        path = save_llm_config(config_path_for_write(self.cfg), llm)
+        self.cfg = replace(self.cfg, path=path, llm=llm)
+        logger.info(
+            "llm settings saved refine=%s translate=%s model=%s",
+            llm.refine.enabled,
+            llm.translate.enabled,
+            llm.model,
+        )
+
     def shutdown(self) -> None:
         self._hold.stop()
 
@@ -107,8 +118,17 @@ class DictationRuntime:
     async def _run_session(self) -> None:
         assert self._stop is not None
         try:
+            pieces: list[str] = []
+            pipeline = LlmPipeline(self.cfg.llm)
             async for piece in transcribe_until(self.cfg, self._stop):
-                inject_text(piece, self.mode)
+                if pipeline.enabled():
+                    pieces.append(piece)
+                else:
+                    inject_text(piece, self.mode)
+            if pieces:
+                raw = "".join(pieces)
+                text = await asyncio.to_thread(pipeline.apply, raw)
+                inject_text(text, self.mode)
             if self.mode == "print":
                 print(flush=True)
             if self.cfg.input.beep:
