@@ -1,14 +1,23 @@
-"""Hold-to-talk global hotkey, including modifier chords."""
+"""Hold-to-talk global hotkey, including modifier chords.
+
+macOS 26+ asserts that HIToolbox TSM APIs run on the main queue.
+pynput's keyboard listener calls TSMGetInputSourceProperty on a
+background thread, which aborts the process (EXC_BREAKPOINT) as soon as
+a shortcut is applied and the listener restarts. Hold-to-talk therefore
+uses NSEvent monitors on the AppKit main thread.
+"""
 
 from __future__ import annotations
 
+import logging
 import re
+import sys
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass
 
-from pynput import keyboard
-
 from yark.errors import ConfigError
+
+logger = logging.getLogger("yark.hotkey")
 
 # macOS virtual key codes (HIToolbox Events.h)
 _KEYCODE_TO_NAME: dict[int, str] = {
@@ -78,45 +87,43 @@ _SYMBOLS = {
     "space": "Space",
 }
 
-_NAMED_KEYS: dict[str, keyboard.Key] = {
-    "right_option": keyboard.Key.alt_r,
-    "left_option": keyboard.Key.alt_l,
-    "option": keyboard.Key.alt,
-    "alt": keyboard.Key.alt,
-    "right_command": keyboard.Key.cmd_r,
-    "left_command": keyboard.Key.cmd_l,
-    "command": keyboard.Key.cmd,
-    "cmd": keyboard.Key.cmd,
-    "right_control": keyboard.Key.ctrl_r,
-    "left_control": keyboard.Key.ctrl_l,
-    "control": keyboard.Key.ctrl,
-    "ctrl": keyboard.Key.ctrl,
-    "right_shift": keyboard.Key.shift_r,
-    "left_shift": keyboard.Key.shift_l,
-    "shift": keyboard.Key.shift,
-    "space": keyboard.Key.space,
-    "f8": keyboard.Key.f8,
-    "f9": keyboard.Key.f9,
-    "f13": keyboard.Key.f13,
-    "f14": keyboard.Key.f14,
-    "f15": keyboard.Key.f15,
-    "f16": keyboard.Key.f16,
-    "f17": keyboard.Key.f17,
-    "f18": keyboard.Key.f18,
-    "f19": keyboard.Key.f19,
+_NAMED = {
+    "right_option",
+    "left_option",
+    "option",
+    "right_command",
+    "left_command",
+    "command",
+    "right_control",
+    "left_control",
+    "control",
+    "right_shift",
+    "left_shift",
+    "shift",
+    "space",
+    "f8",
+    "f9",
+    "f13",
+    "f14",
+    "f15",
+    "f16",
+    "f17",
+    "f18",
+    "f19",
 }
 
-_FAMILIES: dict[str, frozenset] = {
-    "command": frozenset(
-        {keyboard.Key.cmd, keyboard.Key.cmd_l, keyboard.Key.cmd_r}
-    ),
-    "option": frozenset({keyboard.Key.alt, keyboard.Key.alt_l, keyboard.Key.alt_r}),
-    "control": frozenset(
-        {keyboard.Key.ctrl, keyboard.Key.ctrl_l, keyboard.Key.ctrl_r}
-    ),
-    "shift": frozenset(
-        {keyboard.Key.shift, keyboard.Key.shift_l, keyboard.Key.shift_r}
-    ),
+_FAMILIES = frozenset({"command", "option", "control", "shift"})
+
+# NX_DEVICE*KEYMASK bits in NSEvent.modifierFlags (IOLLEvent.h)
+_DEVICE_BITS = {
+    "left_command": 0x00000008,
+    "right_command": 0x00000010,
+    "left_shift": 0x00000002,
+    "right_shift": 0x00000004,
+    "left_option": 0x00000020,
+    "right_option": 0x00000040,
+    "left_control": 0x00000001,
+    "right_control": 0x00002000,
 }
 
 
@@ -145,6 +152,16 @@ def format_chord(parts: Iterable[str]) -> str:
     return parse_hotkey("+".join(parts)).spec()
 
 
+def expand_tokens(names: Iterable[str]) -> set[str]:
+    tokens: set[str] = set()
+    for name in names:
+        if not name:
+            continue
+        tokens.add(name)
+        tokens.add(canonicalize_part(name))
+    return tokens
+
+
 @dataclass(frozen=True)
 class HotkeyChord:
     parts: tuple[str, ...]
@@ -157,7 +174,7 @@ class HotkeyChord:
         for part in self.parts:
             if part in _SYMBOLS:
                 bits.append(_SYMBOLS[part])
-            elif part in _NAMED_KEYS and part.startswith("f") and part[1:].isdigit():
+            elif part.startswith("f") and part[1:].isdigit():
                 bits.append(part.upper())
             elif len(part) == 1:
                 bits.append(part.upper())
@@ -165,18 +182,21 @@ class HotkeyChord:
                 bits.append(part.replace("_", " ").title())
         return " + ".join(bits)
 
-    def matches(self, pressed: set) -> bool:
+    def matches_tokens(self, tokens: set[str]) -> bool:
         if not self.parts:
             return False
-        return all(not pressed.isdisjoint(_keys_for_part(part)) for part in self.parts)
+        expanded = expand_tokens(tokens)
+        return all(_part_present(part, expanded) for part in self.parts)
 
 
 _MODE_RANK = {"refine": 3, "translate": 2, "transcript": 1}
 
 
-def select_mode(pressed: set, chords: dict[str, HotkeyChord]) -> str | None:
+def select_mode(tokens: set[str], chords: dict[str, HotkeyChord]) -> str | None:
     """Longest matching chord wins; on a tie, prefer more processing."""
-    matches = [(name, chord) for name, chord in chords.items() if chord.matches(pressed)]
+    matches = [
+        (name, chord) for name, chord in chords.items() if chord.matches_tokens(tokens)
+    ]
     if not matches:
         return None
     matches.sort(
@@ -196,7 +216,7 @@ def parse_hotkey(spec: str) -> HotkeyChord:
             raise ConfigError(
                 "fn is not a reliable hotkey; record Command+Option, F8, or similar"
             )
-        if part not in _NAMED_KEYS and part not in _FAMILIES and len(part) != 1:
+        if part not in _NAMED and len(part) != 1:
             raise ConfigError(f"unknown hotkey part {part!r} in {spec!r}")
     unique = list(dict.fromkeys(parts))
     unique.sort(key=lambda p: (_MOD_RANK.get(p, 100), p))
@@ -214,26 +234,67 @@ def resolve_hotkey(name: str) -> HotkeyChord:
     return parse_hotkey(name)
 
 
-def _keys_for_part(part: str) -> frozenset:
-    if part in _FAMILIES:
-        return _FAMILIES[part]
-    if part in _NAMED_KEYS:
-        key = _NAMED_KEYS[part]
-        for family in _FAMILIES.values():
-            if key in family:
-                return frozenset({key})
-        return frozenset({key})
-    if len(part) == 1:
-        return frozenset({keyboard.KeyCode.from_char(part)})
-    return frozenset()
+def _part_present(part: str, tokens: set[str]) -> bool:
+    if part in tokens:
+        return True
+    family = canonicalize_part(part)
+    if part == family:
+        return f"left_{family}" in tokens or f"right_{family}" in tokens
+    return False
 
 
-def _forget_key(pressed: set, key) -> None:
-    pressed.discard(key)
-    for family in _FAMILIES.values():
-        if key in family:
-            pressed.difference_update(family)
+class HoldMachine:
+    """Pure hold-to-talk state. Feed currently pressed key tokens."""
+
+    def __init__(
+        self,
+        on_press: Callable[[str], None],
+        on_release: Callable[[], None],
+    ):
+        self._on_press = on_press
+        self._on_release = on_release
+        self.chords: dict[str, HotkeyChord] = {}
+        self.held: str | None = None
+
+    @property
+    def has_chords(self) -> bool:
+        return bool(self.chords)
+
+    def set_chords(self, chords: dict[str, str] | str) -> None:
+        if isinstance(chords, str):
+            chords = {"transcript": chords}
+        parsed: dict[str, HotkeyChord] = {}
+        for name, spec in chords.items():
+            if not spec or not str(spec).strip():
+                continue
+            parsed[name] = parse_hotkey(spec)
+        self.chords = parsed
+        if self.held and self.held not in self.chords:
+            self.held = None
+            self._on_release()
+
+    def sync(self, tokens: set[str]) -> None:
+        if self.held:
+            chord = self.chords.get(self.held)
+            if chord is None or not chord.matches_tokens(tokens):
+                self.held = None
+                self._on_release()
             return
+        mode = select_mode(tokens, self.chords)
+        if mode:
+            self.held = mode
+            self._on_press(mode)
+
+    def reset(self, *, release: bool = True) -> None:
+        if self.held is None:
+            return
+        self.held = None
+        if not release:
+            return
+        try:
+            self._on_release()
+        except Exception:
+            pass
 
 
 class HoldListener:
@@ -244,61 +305,35 @@ class HoldListener:
         on_press: Callable[[str], None],
         on_release: Callable[[], None],
     ):
-        self._on_press = on_press
-        self._on_release = on_release
-        self._listener: keyboard.Listener | None = None
-        self._held: str | None = None
+        self._machine = HoldMachine(on_press, on_release)
+        self._tap: _MacEventTap | None = None
 
-    def start(self, chords: dict[str, str] | str) -> None:
-        self.stop()
-        if isinstance(chords, str):
-            chords = {"transcript": chords}
-        parsed: dict[str, HotkeyChord] = {}
-        for name, spec in chords.items():
-            if not spec or not str(spec).strip():
-                continue
-            parsed[name] = parse_hotkey(spec)
-        if not parsed:
+    def set_chords(self, chords: dict[str, str] | str) -> None:
+        self._machine.set_chords(chords)
+
+    def start(self, chords: dict[str, str] | str | None = None) -> None:
+        if chords is not None:
+            self.set_chords(chords)
+        if self._tap is not None:
             return
-        pressed: set = set()
-
-        def _sync() -> None:
-            if self._held:
-                chord = parsed.get(self._held)
-                if chord is None or not chord.matches(pressed):
-                    self._held = None
-                    self._on_release()
-                return
-            mode = select_mode(pressed, parsed)
-            if mode:
-                self._held = mode
-                self._on_press(mode)
-
-        def _press(key) -> None:
-            pressed.add(key)
-            _sync()
-
-        def _release(key) -> None:
-            _forget_key(pressed, key)
-            _sync()
-
-        self._listener = keyboard.Listener(on_press=_press, on_release=_release)
-        self._listener.start()
+        if not self._machine.has_chords:
+            return
+        if sys.platform != "darwin":
+            logger.warning("hold-to-talk requires macOS")
+            return
+        self._tap = _MacEventTap(self._machine)
+        self._tap.start()
 
     def restart(self, chords: dict[str, str] | str) -> None:
+        self.stop()
         self.start(chords)
 
     def stop(self) -> None:
-        if self._held is not None:
-            self._held = None
-            try:
-                self._on_release()
-            except Exception:
-                pass
-        listener = self._listener
-        self._listener = None
-        if listener is not None:
-            listener.stop()
+        tap = self._tap
+        self._tap = None
+        if tap is not None:
+            tap.stop()
+        self._machine.reset(release=True)
 
 
 def start_hold_listener(
@@ -310,3 +345,128 @@ def start_hold_listener(
     listener = HoldListener(on_press, on_release)
     listener.start(chords)
     return listener
+
+
+class _MacEventTap:
+    def __init__(self, machine: HoldMachine):
+        self._machine = machine
+        self._mods: set[str] = set()
+        self._keys: set[str] = set()
+        self._local = None
+        self._global = None
+
+    def start(self) -> None:
+        from AppKit import (
+            NSEvent,
+            NSEventMaskFlagsChanged,
+            NSEventMaskKeyDown,
+            NSEventMaskKeyUp,
+        )
+
+        mask = NSEventMaskKeyDown | NSEventMaskKeyUp | NSEventMaskFlagsChanged
+
+        def local_handler(event):
+            self._handle(event)
+            return event
+
+        def global_handler(event):
+            self._handle(event)
+
+        self._local = NSEvent.addLocalMonitorForEventsMatchingMask_handler_(
+            mask, local_handler
+        )
+        self._global = NSEvent.addGlobalMonitorForEventsMatchingMask_handler_(
+            mask, global_handler
+        )
+
+    def stop(self) -> None:
+        from AppKit import NSEvent
+
+        if self._local is not None:
+            NSEvent.removeMonitor_(self._local)
+            self._local = None
+        if self._global is not None:
+            NSEvent.removeMonitor_(self._global)
+            self._global = None
+        self._mods.clear()
+        self._keys.clear()
+
+    def _handle(self, event) -> None:
+        try:
+            self._dispatch(event)
+        except Exception:
+            logger.exception("hotkey event failed")
+
+    def _dispatch(self, event) -> None:
+        from AppKit import (
+            NSEventTypeFlagsChanged,
+            NSEventTypeKeyDown,
+            NSEventTypeKeyUp,
+        )
+
+        etype = int(event.type())
+        code = int(event.keyCode())
+        if etype == int(NSEventTypeFlagsChanged):
+            self._mods = _modifiers_from_flags(int(event.modifierFlags()), code)
+        elif etype == int(NSEventTypeKeyDown):
+            if bool(event.isARepeat()):
+                return
+            token = _non_modifier_token(event, code)
+            if token is None:
+                return
+            self._keys.add(token)
+        elif etype == int(NSEventTypeKeyUp):
+            token = _non_modifier_token(event, code)
+            if token is None:
+                return
+            self._keys.discard(token)
+        else:
+            return
+        self._machine.sync(self._mods | self._keys)
+
+
+def _non_modifier_token(event, code: int) -> str | None:
+    name = hotkey_from_keycode(code)
+    if name is not None:
+        if canonicalize_part(name) in _FAMILIES:
+            return None
+        return name
+    chars = event.charactersIgnoringModifiers()
+    if not chars:
+        return None
+    text = str(chars).lower()
+    if len(text) != 1 or not text.isprintable():
+        return None
+    return text
+
+
+def _modifiers_from_flags(flags: int, key_code: int) -> set[str]:
+    from AppKit import (
+        NSEventModifierFlagCommand,
+        NSEventModifierFlagControl,
+        NSEventModifierFlagOption,
+        NSEventModifierFlagShift,
+    )
+
+    family_flags = {
+        "command": int(NSEventModifierFlagCommand),
+        "option": int(NSEventModifierFlagOption),
+        "control": int(NSEventModifierFlagControl),
+        "shift": int(NSEventModifierFlagShift),
+    }
+    mods: set[str] = set()
+    for name, bit in _DEVICE_BITS.items():
+        if flags & bit:
+            mods.add(name)
+    for family, mask in family_flags.items():
+        if not (flags & mask):
+            continue
+        left, right = f"left_{family}", f"right_{family}"
+        if left in mods or right in mods:
+            continue
+        specific = hotkey_from_keycode(key_code)
+        if specific is not None and canonicalize_part(specific) == family:
+            mods.add(specific)
+        else:
+            mods.add(family)
+    return mods

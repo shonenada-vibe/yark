@@ -547,8 +547,8 @@ class YarkAppDelegate(NSObject):
             self._update_record_preview()
             if not self._record_down and self._record_peak:
                 spec = format_chord(self._record_peak)
-                ok = self._apply_hotkey(spec)
-                self._stop_recording(resume=not ok)
+                self._apply_hotkey(spec)
+                self._stop_recording(resume=True)
                 return None
         return None
 
@@ -570,7 +570,17 @@ class YarkAppDelegate(NSObject):
             self.record_button.setTitle_("Record")
         self._sync_shortcut_display()
         if was_recording and resume:
-            self.runtime.resume_hotkey()
+            runtime = self.runtime
+
+            def later() -> None:
+                if self.recording:
+                    return
+                runtime.resume_hotkey()
+
+            # Do not add hold monitors from inside the record key-up callback.
+            from Foundation import NSOperationQueue
+
+            NSOperationQueue.mainQueue().addOperationWithBlock_(later)
 
     def _start_edit_monitor(self) -> None:
         if self.edit_monitor is not None:
@@ -727,13 +737,24 @@ def _prompt_editor(frame):
     return scroll, view
 
 
+_MIC_IMAGES: dict[bool, object] = {}
+
+
 def _mic_image(listening: bool):
+    key = bool(listening)
+    if key in _MIC_IMAGES:
+        return _MIC_IMAGES[key]
     name = "mic.fill" if listening else "mic"
-    image = NSImage.imageWithSystemSymbolName_accessibilityDescription_(name, "yark")
-    if image is None:
-        return None
-    image.setTemplate_(True)
-    image.setSize_((18.0, 18.0))
+    image = None
+    try:
+        image = NSImage.imageWithSystemSymbolName_accessibilityDescription_(name, "yark")
+        if image is not None:
+            image.setTemplate_(True)
+            image.setSize_((18.0, 18.0))
+    except Exception:
+        logger.debug("system symbol %s unavailable", name, exc_info=True)
+        image = None
+    _MIC_IMAGES[key] = image
     return image
 
 

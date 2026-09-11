@@ -12,7 +12,7 @@ from dataclasses import replace
 
 from yark.config import AppConfig, LlmConfig, config_path_for_write, save_hotkey, save_llm_config
 from yark.errors import ConfigError
-from yark.hotkey import HoldListener, hotkey_label, resolve_hotkey
+from yark.hotkey import HoldListener, resolve_hotkey
 from yark.inject import beep, inject_text
 from yark.llm import LlmPipeline
 from yark.permissions import check_accessibility
@@ -73,7 +73,10 @@ class DictationRuntime:
             path=path,
             input=replace(self.cfg.input, **updates),
         )
-        self._hold.restart(self.cfg.input.hotkey_map())
+        # Update the chord map only. Recording pauses the listener; restarting
+        # it from the key-up callback used to spawn pynput's TSM thread and
+        # crash. Resume happens after the record monitors are torn down.
+        self._hold.set_chords(self.cfg.input.hotkey_map())
         logger.info("%s shortcut set to %s (%s)", slot, spec, chord.label())
 
     def pause_hotkey(self) -> None:

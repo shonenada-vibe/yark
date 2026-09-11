@@ -1,8 +1,9 @@
 import pytest
-from pynput import keyboard
 
 from yark.errors import ConfigError
 from yark.hotkey import (
+    HoldMachine,
+    expand_tokens,
     hotkey_from_keycode,
     hotkey_label,
     normalize_hotkey_name,
@@ -54,11 +55,19 @@ def test_keycode_mapping():
 
 def test_chord_matches_any_side():
     chord = parse_hotkey("command+option")
-    assert chord.matches({keyboard.Key.cmd_l, keyboard.Key.alt_r})
-    assert chord.matches({keyboard.Key.cmd_r, keyboard.Key.alt_l})
-    assert not chord.matches({keyboard.Key.cmd_l})
-    assert not chord.matches({keyboard.Key.alt_l})
-    assert not chord.matches(set())
+    assert chord.matches_tokens(expand_tokens({"left_command", "right_option"}))
+    assert chord.matches_tokens(expand_tokens({"right_command", "left_option"}))
+    assert not chord.matches_tokens(expand_tokens({"left_command"}))
+    assert not chord.matches_tokens(expand_tokens({"left_option"}))
+    assert not chord.matches_tokens(set())
+
+
+def test_right_option_does_not_match_left():
+    chord = parse_hotkey("right_option")
+    assert chord.matches_tokens(expand_tokens({"right_option"}))
+    assert not chord.matches_tokens(expand_tokens({"left_option"}))
+    assert parse_hotkey("option").matches_tokens(expand_tokens({"right_option"}))
+    assert parse_hotkey("option").matches_tokens(expand_tokens({"left_option"}))
 
 
 def test_select_mode_prefers_longer_chord():
@@ -67,9 +76,47 @@ def test_select_mode_prefers_longer_chord():
         "translate": parse_hotkey("command+option"),
         "refine": parse_hotkey("command+shift+option"),
     }
-    pressed = {keyboard.Key.cmd_l, keyboard.Key.alt_l}
+    pressed = expand_tokens({"left_command", "left_option"})
     assert select_mode(pressed, chords) == "translate"
-    pressed.add(keyboard.Key.shift_l)
+    pressed |= expand_tokens({"left_shift"})
     assert select_mode(pressed, chords) == "refine"
-    assert select_mode({keyboard.Key.alt_r}, chords) == "transcript"
+    assert select_mode(expand_tokens({"right_option"}), chords) == "transcript"
     assert select_mode(set(), chords) is None
+
+
+def test_hold_machine_press_and_release():
+    events: list = []
+    machine = HoldMachine(
+        lambda mode: events.append(("down", mode)),
+        lambda: events.append("up"),
+    )
+    machine.set_chords(
+        {
+            "transcript": "right_option",
+            "translate": "command+option",
+        }
+    )
+    machine.sync(expand_tokens({"right_option"}))
+    assert events == [("down", "transcript")]
+    machine.sync(set())
+    assert events == [("down", "transcript"), "up"]
+
+
+def test_hold_machine_picks_translate_when_command_is_down_first():
+    events: list = []
+    machine = HoldMachine(
+        lambda mode: events.append(("down", mode)),
+        lambda: events.append("up"),
+    )
+    machine.set_chords(
+        {
+            "transcript": "option",
+            "translate": "command+option",
+        }
+    )
+    machine.sync(expand_tokens({"left_command"}))
+    assert events == []
+    machine.sync(expand_tokens({"left_command", "left_option"}))
+    assert events == [("down", "translate")]
+    machine.sync(expand_tokens({"left_option"}))
+    assert events == [("down", "translate"), "up"]
