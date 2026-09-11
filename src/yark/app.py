@@ -11,7 +11,7 @@ from collections.abc import Callable
 from dataclasses import replace
 
 from yark.config import AppConfig, LlmConfig, config_path_for_write, save_hotkey, save_llm_config
-from yark.errors import ConfigError
+from yark.errors import ConfigError, format_hud_error
 from yark.hotkey import HoldListener, resolve_hotkey
 from yark.inject import beep, inject_text
 from yark.llm import LlmPipeline
@@ -35,6 +35,7 @@ class DictationRuntime:
         self.mode = inject_mode
         self.loop = loop
         self.on_listening: Callable[[bool], None] = lambda _listening: None
+        self.on_error: Callable[[str], None] = lambda _message: None
         self._stop: asyncio.Event | None = None
         self._task: asyncio.Task | None = None
         self._session_mode = "transcript"
@@ -140,6 +141,9 @@ class DictationRuntime:
 
     async def _run_session(self) -> None:
         assert self._stop is not None
+        failed: BaseException | None = None
+        llm_error: BaseException | None = None
+        llm_action: str | None = None
         try:
             pieces: list[str] = []
             pipeline = LlmPipeline(self.cfg.llm)
@@ -152,23 +156,37 @@ class DictationRuntime:
             if pieces:
                 raw = "".join(pieces)
                 text = await asyncio.to_thread(pipeline.apply, raw, dictation_mode)
+                llm_error = pipeline.last_error
+                llm_action = pipeline.last_error_action
                 inject_text(text, self.mode)
             if self.mode == "print":
                 print(flush=True)
             if self.cfg.input.beep:
                 beep()
-        except Exception:
+        except Exception as exc:
+            failed = exc
             logger.exception("dictation session failed")
             if self.cfg.input.beep:
                 beep()
         finally:
             self._set_listening(False)
+        if failed is not None:
+            self._notify_error(failed)
+        elif llm_error is not None:
+            self._notify_error(llm_error, action=llm_action)
 
     def _set_listening(self, listening: bool) -> None:
         try:
             self.on_listening(listening)
         except Exception:
             logger.debug("on_listening failed", exc_info=True)
+
+    def _notify_error(self, exc: BaseException, *, action: str | None = None) -> None:
+        message = format_hud_error(exc, action=action)
+        try:
+            self.on_error(message)
+        except Exception:
+            logger.debug("on_error failed", exc_info=True)
 
 
 def run_listener(cfg: AppConfig, *, inject_mode: str | None = None) -> None:

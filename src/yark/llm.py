@@ -124,11 +124,15 @@ class LlmPipeline:
     def __init__(self, cfg: LlmConfig, completer: Completer | None = None):
         self._cfg = cfg
         self._completer = completer or HttpCompleter()
+        self.last_error: BaseException | None = None
+        self.last_error_action: str | None = None
 
     def enabled(self, mode: str = "transcript") -> bool:
         return mode in {"translate", "refine"}
 
     def apply(self, text: str, mode: str = "transcript") -> str:
+        self.last_error = None
+        self.last_error_action = None
         if not text.strip() or not self.enabled(mode):
             return text
         out = text
@@ -153,8 +157,11 @@ class LlmPipeline:
         )
         try:
             result = self._completer.complete(request).strip()
-        except Exception:
+        except Exception as exc:
             logger.exception("%s failed; typing original text", name)
+            if self.last_error is None:
+                self.last_error = exc
+                self.last_error_action = name
             return text
         if not result:
             logger.warning("%s returned empty text; keeping original", name)

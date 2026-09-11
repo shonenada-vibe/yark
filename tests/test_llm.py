@@ -107,3 +107,5 @@ def test_llm_error_keeps_original_text():
     pipe = LlmPipeline(_cfg(refine=True), fake)
     assert pipe.apply("keep me", mode="translate") == "keep me"
     assert len(fake.calls) == 1
+    assert isinstance(pipe.last_error, RuntimeError)
+    assert pipe.last_error_action == "translate"

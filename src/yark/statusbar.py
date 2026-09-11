@@ -8,6 +8,7 @@ import signal
 
 import objc
 from AppKit import (
+    NSAnimationContext,
     NSApp,
     NSApplication,
     NSApplicationActivationPolicyAccessory,
@@ -36,24 +37,44 @@ from AppKit import (
     NSFloatingWindowLevel,
     NSFont,
     NSImage,
+    NSImageScaleProportionallyDown,
+    NSImageView,
+    NSLineBreakByTruncatingTail,
     NSLineBreakByWordWrapping,
     NSMakeRect,
     NSMenu,
     NSMenuItem,
+    NSPanel,
+    NSScreen,
     NSScrollView,
     NSSecureTextField,
     NSSquareStatusItemLength,
     NSStatusBar,
+    NSStatusWindowLevel,
     NSTimer,
     NSTabView,
     NSTabViewItem,
+    NSTextAlignmentLeft,
     NSTextAlignmentCenter,
     NSTextField,
     NSTextView,
     NSVariableStatusItemLength,
     NSView,
+    NSViewHeightSizable,
+    NSViewWidthSizable,
+    NSVisualEffectBlendingModeBehindWindow,
+    NSVisualEffectMaterialHUDWindow,
+    NSVisualEffectStateActive,
+    NSVisualEffectView,
     NSWindow,
+    NSWindowAnimationBehaviorNone,
+    NSWindowCollectionBehaviorCanJoinAllSpaces,
+    NSWindowCollectionBehaviorFullScreenAuxiliary,
+    NSWindowCollectionBehaviorIgnoresCycle,
+    NSWindowCollectionBehaviorStationary,
+    NSWindowStyleMaskBorderless,
     NSWindowStyleMaskClosable,
+    NSWindowStyleMaskNonactivatingPanel,
     NSWindowStyleMaskTitled,
 )
 from Foundation import NSObject
@@ -142,7 +163,14 @@ class YarkAppDelegate(NSObject):
         self.heartbeat = None
         self._record_down: set[str] = set()
         self._record_peak: set[str] = set()
+        self.hud_panel = None
+        self.hud_label = None
+        self.hud_icon = None
+        self.hud_timer = None
+        self._hud_gen = 0
+        self._hud_kind = None
         runtime.on_listening = self.setListening_
+        runtime.on_error = self.showError_
         return self
 
     def applicationDidFinishLaunching_(self, notification) -> None:
@@ -180,6 +208,8 @@ class YarkAppDelegate(NSObject):
         except Exception:
             logger.debug("save on quit failed", exc_info=True)
         self._stop_recording(resume=False)
+        self._listening = False
+        self._hide_hud()
         NSApp.stop_(None)
         _poke_run_loop()
 
@@ -235,6 +265,7 @@ class YarkAppDelegate(NSObject):
         self.setListening_(False)
 
     def setListening_(self, listening) -> None:
+        started = bool(listening) and not bool(self._listening)
         self._listening = bool(listening)
 
         def apply() -> None:
@@ -257,8 +288,117 @@ class YarkAppDelegate(NSObject):
             self.shortcut_line.setTitle_(summary)
             button.setToolTip_(f"yark — {status}. {summary}")
             self._sync_shortcut_display()
+            if self._listening:
+                self._show_listening_hud(mode)
+                if started:
+                    _haptic_tap()
+            else:
+                self._hide_hud(only="listening")
 
         _on_main(apply)
+
+    def showError_(self, message) -> None:
+        text = str(message or "").strip()
+        if not text:
+            return
+
+        def apply() -> None:
+            self._show_error_hud(text)
+            if self.status_line is not None and not self._listening:
+                self.status_line.setTitle_(text if len(text) <= 48 else text[:47] + "…")
+
+        _on_main(apply)
+
+    def dismissErrorHud_(self, timer) -> None:
+        self.hud_timer = None
+        if self._listening or self._hud_kind != "error":
+            return
+        self._hide_hud(only="error")
+        if self.status_line is not None and not self._listening:
+            self.status_line.setTitle_("Ready")
+
+    def _show_listening_hud(self, mode: str) -> None:
+        self._present_hud(
+            _hud_caption(mode),
+            kind="listening",
+            image=_mic_image(True),
+        )
+
+    def _show_error_hud(self, message: str) -> None:
+        self._present_hud(
+            message,
+            kind="error",
+            image=_symbol_image("exclamationmark.triangle.fill"),
+            tint=NSColor.systemOrangeColor(),
+            auto_hide=3.0,
+        )
+        _haptic_tap()
+
+    def _present_hud(
+        self,
+        caption: str,
+        *,
+        kind: str,
+        image=None,
+        tint=None,
+        auto_hide: float | None = None,
+    ) -> None:
+        self._cancel_hud_timer()
+        panel, label, icon = self._ensure_hud()
+        self._hud_kind = kind
+        label.setStringValue_(caption)
+        if image is not None:
+            icon.setImage_(image)
+            icon.setHidden_(False)
+        else:
+            icon.setHidden_(True)
+        try:
+            icon.setContentTintColor_(tint)
+        except Exception:
+            pass
+        _layout_hud(panel, label, icon)
+        self._hud_gen += 1
+        if not bool(panel.isVisible()) or float(panel.alphaValue()) < 0.2:
+            panel.setAlphaValue_(0.0)
+        panel.orderFrontRegardless()
+        _fade_panel(panel, 0.88)
+        if auto_hide:
+            self.hud_timer = NSTimer.scheduledTimerWithTimeInterval_target_selector_userInfo_repeats_(
+                auto_hide, self, "dismissErrorHud:", None, False
+            )
+
+    def _hide_hud(self, only: str | None = None) -> None:
+        if only is not None and self._hud_kind != only:
+            return
+        self._cancel_hud_timer()
+        panel = self.hud_panel
+        self._hud_kind = None
+        if panel is None or not panel.isVisible():
+            return
+        self._hud_gen += 1
+        gen = self._hud_gen
+
+        def done() -> None:
+            if self._hud_gen != gen or self._hud_kind is not None:
+                return
+            panel.orderOut_(None)
+
+        _fade_panel(panel, 0.0, done)
+
+    def _cancel_hud_timer(self) -> None:
+        timer = self.hud_timer
+        self.hud_timer = None
+        if timer is not None:
+            timer.invalidate()
+
+    def _ensure_hud(self):
+        if self.hud_panel is not None:
+            return self.hud_panel, self.hud_label, self.hud_icon
+        panel, label, icon = _make_listening_hud()
+        self.hud_panel = panel
+        self.hud_label = label
+        self.hud_icon = icon
+        return panel, label, icon
 
     def _build_status_item(self) -> None:
         item = NSStatusBar.systemStatusBar().statusItemWithLength_(
@@ -480,6 +620,7 @@ class YarkAppDelegate(NSObject):
             self.runtime.update_llm(llm)
         except Exception:
             logger.exception("failed to save LLM settings")
+            self.showError_("Could not save settings")
 
     def _sync_shortcut_display(self) -> None:
         displays = getattr(self, "shortcut_displays", None) or {}
@@ -511,6 +652,7 @@ class YarkAppDelegate(NSObject):
             self.runtime.set_hotkey(name, slot)
         except ConfigError as exc:
             logger.warning("cannot set shortcut: %s", exc)
+            self.showError_(str(exc))
             return False
         self.setListening_(self._listening)
         return True
@@ -737,14 +879,16 @@ def _prompt_editor(frame):
     return scroll, view
 
 
-_MIC_IMAGES: dict[bool, object] = {}
-
-
 def _mic_image(listening: bool):
-    key = bool(listening)
-    if key in _MIC_IMAGES:
-        return _MIC_IMAGES[key]
-    name = "mic.fill" if listening else "mic"
+    return _symbol_image("mic.fill" if listening else "mic")
+
+
+_SYMBOL_IMAGES: dict[str, object] = {}
+
+
+def _symbol_image(name: str):
+    if name in _SYMBOL_IMAGES:
+        return _SYMBOL_IMAGES[name]
     image = None
     try:
         image = NSImage.imageWithSystemSymbolName_accessibilityDescription_(name, "yark")
@@ -754,7 +898,7 @@ def _mic_image(listening: bool):
     except Exception:
         logger.debug("system symbol %s unavailable", name, exc_info=True)
         image = None
-    _MIC_IMAGES[key] = image
+    _SYMBOL_IMAGES[name] = image
     return image
 
 
@@ -777,6 +921,117 @@ def _mode_title(mode: str) -> str:
         "translate": "Translate",
         "refine": "Translate + Refine",
     }.get(mode, mode or "Transcript")
+
+
+def _hud_caption(mode: str) -> str:
+    return {
+        "transcript": "Listening",
+        "translate": "Translate",
+        "refine": "Refine",
+    }.get(mode, "Listening")
+
+
+def _make_listening_hud():
+    panel = NSPanel.alloc().initWithContentRect_styleMask_backing_defer_(
+        NSMakeRect(0, 0, 120, 28),
+        NSWindowStyleMaskBorderless | NSWindowStyleMaskNonactivatingPanel,
+        NSBackingStoreBuffered,
+        False,
+    )
+    panel.setLevel_(NSStatusWindowLevel)
+    panel.setOpaque_(False)
+    panel.setBackgroundColor_(NSColor.clearColor())
+    panel.setHasShadow_(True)
+    panel.setIgnoresMouseEvents_(True)
+    panel.setFloatingPanel_(True)
+    panel.setBecomesKeyOnlyIfNeeded_(True)
+    panel.setHidesOnDeactivate_(False)
+    panel.setReleasedWhenClosed_(False)
+    panel.setAnimationBehavior_(NSWindowAnimationBehaviorNone)
+    panel.setCollectionBehavior_(
+        NSWindowCollectionBehaviorCanJoinAllSpaces
+        | NSWindowCollectionBehaviorStationary
+        | NSWindowCollectionBehaviorIgnoresCycle
+        | NSWindowCollectionBehaviorFullScreenAuxiliary
+    )
+    effect = NSVisualEffectView.alloc().initWithFrame_(NSMakeRect(0, 0, 120, 28))
+    effect.setMaterial_(NSVisualEffectMaterialHUDWindow)
+    effect.setBlendingMode_(NSVisualEffectBlendingModeBehindWindow)
+    effect.setState_(NSVisualEffectStateActive)
+    effect.setAutoresizingMask_(NSViewWidthSizable | NSViewHeightSizable)
+    effect.setWantsLayer_(True)
+    layer = effect.layer()
+    if layer is not None:
+        layer.setCornerRadius_(14.0)
+        layer.setMasksToBounds_(True)
+    icon = NSImageView.alloc().initWithFrame_(NSMakeRect(10, 7.5, 13, 13))
+    icon.setEditable_(False)
+    icon.setImageScaling_(NSImageScaleProportionallyDown)
+    label = NSTextField.alloc().initWithFrame_(NSMakeRect(29, 6, 80, 16))
+    label.setBezeled_(False)
+    label.setDrawsBackground_(False)
+    label.setEditable_(False)
+    label.setSelectable_(False)
+    label.setAlignment_(NSTextAlignmentLeft)
+    label.setLineBreakMode_(NSLineBreakByTruncatingTail)
+    label.setFont_(NSFont.systemFontOfSize_(11.0))
+    label.setTextColor_(NSColor.labelColor())
+    effect.addSubview_(icon)
+    effect.addSubview_(label)
+    panel.setContentView_(effect)
+    panel.setAlphaValue_(0.0)
+    return panel, label, icon
+
+
+def _layout_hud(panel, label, icon) -> None:
+    label.sizeToFit()
+    text_w = min(max(float(label.frame().size.width), 52.0), 280.0)
+    height = 28.0
+    pad = 10.0
+    icon_s = 13.0
+    gap = 6.0
+    show_icon = not bool(icon.isHidden())
+    left = pad
+    if show_icon:
+        icon.setFrame_(NSMakeRect(left, (height - icon_s) / 2.0, icon_s, icon_s))
+        left += icon_s + gap
+    label.setFrame_(NSMakeRect(left, (height - 16.0) / 2.0, text_w, 16.0))
+    width = left + text_w + pad
+    screen = NSScreen.mainScreen()
+    if screen is None:
+        screens = NSScreen.screens()
+        screen = screens[0] if screens else None
+    if screen is None:
+        panel.setContentSize_((width, height))
+        return
+    visible = screen.visibleFrame()
+    x = visible.origin.x + (visible.size.width - width) / 2.0
+    y = visible.origin.y + visible.size.height - height - 10.0
+    panel.setFrame_display_(NSMakeRect(x, y, width, height), False)
+
+
+def _fade_panel(panel, alpha: float, done=None) -> None:
+    def animations(ctx) -> None:
+        ctx.setDuration_(0.12 if alpha > 0 else 0.16)
+        panel.animator().setAlphaValue_(alpha)
+
+    NSAnimationContext.runAnimationGroup_completionHandler_(animations, done)
+
+
+def _haptic_tap() -> None:
+    try:
+        from AppKit import (
+            NSHapticFeedbackManager,
+            NSHapticFeedbackPatternAlignment,
+            NSHapticFeedbackPerformanceTimeNow,
+        )
+
+        NSHapticFeedbackManager.defaultPerformer().performFeedbackPattern_performanceTime_(
+            NSHapticFeedbackPatternAlignment,
+            NSHapticFeedbackPerformanceTimeNow,
+        )
+    except Exception:
+        logger.debug("haptic tap unavailable", exc_info=True)
 
 
 def _shortcut_summary(mapping: dict[str, str]) -> str:
