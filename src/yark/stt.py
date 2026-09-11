@@ -12,6 +12,7 @@ from websockets.exceptions import WebSocketException
 
 from yark.config import AppConfig
 from yark.errors import AuthError, SttError
+from yark.proxy import proxy_for_url, redact_proxy
 from yark.protocol import (
     MSG_SERVER_ERROR,
     default_request_payload,
@@ -42,7 +43,16 @@ class VolcengineStt:
     async def connect(self) -> None:
         headers = self._cfg.volcengine.auth_headers(self.request_id)
         url = self._cfg.volcengine.endpoint
-        logger.info("connecting %s request_id=%s", url, self.request_id)
+        proxy = proxy_for_url(url)
+        if proxy:
+            logger.info(
+                "connecting %s request_id=%s via proxy %s",
+                url,
+                self.request_id,
+                redact_proxy(proxy),
+            )
+        else:
+            logger.info("connecting %s request_id=%s", url, self.request_id)
         try:
             self._ws = await websockets.connect(
                 url,
@@ -51,7 +61,7 @@ class VolcengineStt:
                 open_timeout=15,
                 ping_interval=20,
                 ping_timeout=20,
-                proxy=None,
+                proxy=proxy,
             )
         except WebSocketException as exc:
             text = str(exc)

@@ -9,6 +9,7 @@ from yark.hotkey import (
     parse_hotkey,
     recording_token_from_keycode,
     resolve_hotkey,
+    select_mode,
 )
 
 
@@ -58,3 +59,17 @@ def test_chord_matches_any_side():
     assert not chord.matches({keyboard.Key.cmd_l})
     assert not chord.matches({keyboard.Key.alt_l})
     assert not chord.matches(set())
+
+
+def test_select_mode_prefers_longer_chord():
+    chords = {
+        "transcript": parse_hotkey("option"),
+        "translate": parse_hotkey("command+option"),
+        "refine": parse_hotkey("command+shift+option"),
+    }
+    pressed = {keyboard.Key.cmd_l, keyboard.Key.alt_l}
+    assert select_mode(pressed, chords) == "translate"
+    pressed.add(keyboard.Key.shift_l)
+    assert select_mode(pressed, chords) == "refine"
+    assert select_mode({keyboard.Key.alt_r}, chords) == "transcript"
+    assert select_mode(set(), chords) is None

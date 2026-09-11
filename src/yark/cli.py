@@ -81,7 +81,12 @@ def _cmd_listen(args) -> None:
     cfg = _load(args)
     _require_auth(cfg)
     if args.hotkey:
-        cfg = replace(cfg, input=replace(cfg.input, hotkey=args.hotkey))
+        cfg = replace(
+            cfg,
+            input=replace(
+                cfg.input, hotkey=args.hotkey, hotkey_transcript=args.hotkey
+            ),
+        )
     mode = "print" if args.print_only else cfg.input.inject
     run_listener(cfg, inject_mode=mode)
 
@@ -141,12 +146,16 @@ def _cmd_doctor(args) -> None:
     print(f"config: {cfg.path or '(defaults + env)'}")
     print(f"volcengine: {cfg.volcengine.redacted()}")
     print(f"endpoint: {cfg.volcengine.endpoint}")
-    print(f"hotkey: {cfg.input.hotkey}")
+    print(f"hotkeys: {cfg.input.hotkey_map()}")
     print(f"inject: {cfg.input.inject}")
     print(
         f"llm: model={cfg.llm.model} refine={'on' if cfg.llm.refine.enabled else 'off'} "
         f"translate={'on' if cfg.llm.translate.enabled else 'off'}"
     )
+    from yark.proxy import proxy_for_url, redact_proxy
+
+    proxy = proxy_for_url(cfg.volcengine.endpoint) or proxy_for_url(cfg.llm.base_url)
+    print(f"proxy: {redact_proxy(proxy) if proxy else '(none)'}")
     try:
         cfg.volcengine.auth_headers("doctor")
         print("auth: ok")

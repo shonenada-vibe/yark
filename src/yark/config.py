@@ -86,8 +86,19 @@ class AudioConfig:
 @dataclass(frozen=True)
 class InputConfig:
     hotkey: str = "right_option"
+    hotkey_transcript: str = "right_option"
+    hotkey_translate: str = "command+option"
+    hotkey_refine: str = "command+shift+option"
     inject: str = "unicode"
     beep: bool = True
+
+    def hotkey_map(self) -> dict[str, str]:
+        mapping = {
+            "transcript": self.hotkey_transcript or self.hotkey,
+            "translate": self.hotkey_translate,
+            "refine": self.hotkey_refine,
+        }
+        return {name: spec for name, spec in mapping.items() if spec.strip()}
 
 
 @dataclass(frozen=True)
@@ -168,7 +179,12 @@ def load_config(path: Path | None = None) -> AppConfig:
             device=str(audio.get("device") or ""),
         ),
         input=InputConfig(
-            hotkey=str(inp.get("hotkey") or "right_option"),
+            hotkey=str(inp.get("hotkey_transcript") or inp.get("hotkey") or "right_option"),
+            hotkey_transcript=str(
+                inp.get("hotkey_transcript") or inp.get("hotkey") or "right_option"
+            ),
+            hotkey_translate=_optional_hotkey(inp, "hotkey_translate", "command+option"),
+            hotkey_refine=_optional_hotkey(inp, "hotkey_refine", "command+shift+option"),
             inject=str(inp.get("inject") or "unicode"),
             beep=bool(inp.get("beep") if "beep" in inp else True),
         ),
@@ -191,6 +207,15 @@ def load_config(path: Path | None = None) -> AppConfig:
         path=used,
     )
     return _apply_env(cfg)
+
+
+def _optional_hotkey(inp: dict, key: str, default: str) -> str:
+    """Keep existing configs from inheriting new default chords they did not set."""
+    if key in inp:
+        return str(inp.get(key) or "")
+    if inp:
+        return ""
+    return default
 
 
 def _feature_from_table(data: dict, default_prompt: str) -> LlmFeatureConfig:
@@ -234,6 +259,7 @@ def _apply_env(cfg: AppConfig) -> AppConfig:
     inp_updates = {}
     if hotkey:
         inp_updates["hotkey"] = hotkey
+        inp_updates["hotkey_transcript"] = hotkey
     if inject:
         inp_updates["inject"] = inject
     if inp_updates:
@@ -283,8 +309,14 @@ chunk_ms = 200
 device = ""
 
 [input]
-# Examples: right_option, f8, command+option
+# Hold-to-talk shortcuts. Record them in Settings.
+#   transcript = STT only
+#   translate  = STT + translate
+#   refine     = STT + translate + refine
 hotkey = "right_option"
+hotkey_transcript = "right_option"
+hotkey_translate = "command+option"
+hotkey_refine = "command+shift+option"
 inject = "unicode"
 beep = true
 
@@ -358,14 +390,19 @@ def _write_feature_table(parent, name: str, feature: LlmFeatureConfig) -> None:
     child["prompt"] = feature.prompt
 
 
-def save_hotkey(path: Path, hotkey: str) -> Path:
-    """Set `input.hotkey` in a TOML file, preserving comments when possible."""
+def save_hotkey(path: Path, hotkey: str, key: str = "hotkey") -> Path:
+    """Set an `input` hotkey field in a TOML file, preserving comments when possible."""
+    if not re.fullmatch(r"[A-Za-z0-9_]+", key):
+        raise ConfigError(f"invalid hotkey field {key!r}")
     if not re.fullmatch(r"[A-Za-z0-9_+]+", hotkey):
         raise ConfigError(f"invalid hotkey name {hotkey!r}")
     if not path.exists():
         write_example_config(path)
     text = path.read_text(encoding="utf-8")
-    path.write_text(_replace_toml_string(text, "hotkey", hotkey), encoding="utf-8")
+    text = _replace_toml_string(text, key, hotkey)
+    if key == "hotkey_transcript":
+        text = _replace_toml_string(text, "hotkey", hotkey)
+    path.write_text(text, encoding="utf-8")
     return path
 
 

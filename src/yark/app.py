@@ -11,11 +11,18 @@ from collections.abc import Callable
 from dataclasses import replace
 
 from yark.config import AppConfig, LlmConfig, config_path_for_write, save_hotkey, save_llm_config
+from yark.errors import ConfigError
 from yark.hotkey import HoldListener, hotkey_label, resolve_hotkey
 from yark.inject import beep, inject_text
 from yark.llm import LlmPipeline
 from yark.permissions import check_accessibility
 from yark.session import transcribe_until
+
+_HOTKEY_FIELDS = {
+    "transcript": "hotkey_transcript",
+    "translate": "hotkey_translate",
+    "refine": "hotkey_refine",
+}
 
 logger = logging.getLogger("yark")
 
@@ -30,11 +37,16 @@ class DictationRuntime:
         self.on_listening: Callable[[bool], None] = lambda _listening: None
         self._stop: asyncio.Event | None = None
         self._task: asyncio.Task | None = None
+        self._session_mode = "transcript"
         self._hold = HoldListener(self._on_press, self._on_release)
 
     @property
     def hotkey(self) -> str:
-        return self.cfg.input.hotkey
+        return self.cfg.input.hotkey_transcript or self.cfg.input.hotkey
+
+    @property
+    def session_mode(self) -> str:
+        return self._session_mode
 
     def start(self) -> None:
         if self.mode != "print" and not check_accessibility(prompt=True):
@@ -42,26 +54,33 @@ class DictationRuntime:
                 "Accessibility permission is off. Grant it to this terminal in "
                 "System Settings → Privacy & Security → Accessibility, then rerun."
             )
-        self._hold.start(self.hotkey)
-        logger.info("hold %s to dictate", self.hotkey)
+        mapping = self.cfg.input.hotkey_map()
+        self._hold.start(mapping)
+        logger.info("hold shortcuts %s", mapping)
 
-    def set_hotkey(self, name: str) -> None:
+    def set_hotkey(self, name: str, slot: str = "transcript") -> None:
+        if slot not in _HOTKEY_FIELDS:
+            raise ConfigError(f"unknown shortcut slot {slot!r}")
         chord = resolve_hotkey(name)
         spec = chord.spec()
-        path = save_hotkey(config_path_for_write(self.cfg), spec)
+        field = _HOTKEY_FIELDS[slot]
+        path = save_hotkey(config_path_for_write(self.cfg), spec, key=field)
+        updates = {field: spec}
+        if slot == "transcript":
+            updates["hotkey"] = spec
         self.cfg = replace(
             self.cfg,
             path=path,
-            input=replace(self.cfg.input, hotkey=spec),
+            input=replace(self.cfg.input, **updates),
         )
-        self._hold.restart(spec)
-        logger.info("shortcut set to %s (%s)", spec, chord.label())
+        self._hold.restart(self.cfg.input.hotkey_map())
+        logger.info("%s shortcut set to %s (%s)", slot, spec, chord.label())
 
     def pause_hotkey(self) -> None:
         self._hold.stop()
 
     def resume_hotkey(self) -> None:
-        self._hold.start(self.hotkey)
+        self._hold.start(self.cfg.input.hotkey_map())
 
     def update_llm(self, llm: LlmConfig) -> None:
         path = save_llm_config(config_path_for_write(self.cfg), llm)
@@ -94,16 +113,17 @@ class DictationRuntime:
             logger.debug("session did not finish on shutdown", exc_info=True)
         self._set_listening(False)
 
-    def _on_press(self) -> None:
-        self.loop.call_soon_threadsafe(self._start_session)
+    def _on_press(self, mode: str) -> None:
+        self.loop.call_soon_threadsafe(self._start_session, mode)
 
     def _on_release(self) -> None:
         self.loop.call_soon_threadsafe(self._stop_session)
 
-    def _start_session(self) -> None:
+    def _start_session(self, mode: str = "transcript") -> None:
         if self._task is not None and not self._task.done():
             return
-        logger.info("listening (release %s to stop)", self.hotkey)
+        self._session_mode = mode
+        logger.info("listening mode=%s", mode)
         if self.cfg.input.beep:
             beep()
         self._stop = asyncio.Event()
@@ -120,14 +140,15 @@ class DictationRuntime:
         try:
             pieces: list[str] = []
             pipeline = LlmPipeline(self.cfg.llm)
+            dictation_mode = self._session_mode
             async for piece in transcribe_until(self.cfg, self._stop):
-                if pipeline.enabled():
+                if pipeline.enabled(dictation_mode):
                     pieces.append(piece)
                 else:
                     inject_text(piece, self.mode)
             if pieces:
                 raw = "".join(pieces)
-                text = await asyncio.to_thread(pipeline.apply, raw)
+                text = await asyncio.to_thread(pipeline.apply, raw, dictation_mode)
                 inject_text(text, self.mode)
             if self.mode == "print":
                 print(flush=True)
@@ -169,7 +190,7 @@ def run_listener(cfg: AppConfig, *, inject_mode: str | None = None) -> None:
 def _run_headless(runtime: DictationRuntime) -> None:
     runtime.start()
     print(
-        f"yark is running. Hold {runtime.hotkey} to dictate, Ctrl+C to quit.",
+        f"yark is running. Shortcuts: {runtime.cfg.input.hotkey_map()}. Ctrl+C to quit.",
         flush=True,
     )
     stop = threading.Event()

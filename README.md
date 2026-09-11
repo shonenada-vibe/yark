@@ -43,7 +43,13 @@ yark doctor
 yark listen
 ```
 
-`yark listen` puts a mic icon in the macOS menu bar. Hold **Right Option** (default) to dictate, release to stop. Click the icon → **Settings…** → **Record shortcut**, then hold the keys you want (for example **⌘ + ⌥**) and release to save. Quit from the menu, or Ctrl+C.
+`yark listen` puts a mic icon in the macOS menu bar. Three hold-to-talk shortcuts (Settings → Shortcut):
+
+1. **Transcript** — type STT as-is  
+2. **Translate** — STT, then translate  
+3. **Translate + Refine** — STT, translate, then refine  
+
+Click the icon → **Settings…** → **Record** next to each level. Quit from the menu, or Ctrl+C.
 
 ## Commands
 
@@ -58,13 +64,17 @@ yark init-config
 
 The menu bar extra shows Ready vs Listening. **Settings…** (or ⌘,) has three tabs:
 
-- **Shortcut** — record a hold-to-talk key or chord (including **⌘ + ⌥**)
+- **Shortcut** — record three hold-to-talk chords (transcript / translate / translate+refine)
 - **Refine** — enable, API key, prompt (clean up ASR text before typing)
 - **Translate** — enable, API key, prompt (run after refine)
 
 Shared **Base URL**, **Model**, and fallback **API key** sit above the tabs. Any OpenAI-compatible `/v1/chat/completions` endpoint works. When either feature is on, yark waits until you release the hotkey, then post-processes the full transcript and types once.
 
 Environment overrides: `YARK_VOLC_API_KEY`, `YARK_VOLC_RESOURCE_ID`, `YARK_VOLC_ENDPOINT`, `YARK_HOTKEY`, `YARK_INJECT`, `YARK_LLM_API_KEY`, `YARK_LLM_BASE_URL`, `YARK_LLM_MODEL`.
+
+HTTP(S) proxy: set `HTTPS_PROXY` (or `https_proxy` / `ALL_PROXY` / `HTTP_PROXY`). `NO_PROXY` / `no_proxy` bypasses listed hosts. Used for Volcengine WebSocket STT and the OpenAI-compatible LLM calls.
+
+LLM requests send a browser-like `User-Agent` so hosts behind Cloudflare (for example Groq) do not return error 1010. Override with `YARK_LLM_USER_AGENT` if needed.
 
 ## Inject modes
 

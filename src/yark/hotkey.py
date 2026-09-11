@@ -171,6 +171,21 @@ class HotkeyChord:
         return all(not pressed.isdisjoint(_keys_for_part(part)) for part in self.parts)
 
 
+_MODE_RANK = {"refine": 3, "translate": 2, "transcript": 1}
+
+
+def select_mode(pressed: set, chords: dict[str, HotkeyChord]) -> str | None:
+    """Longest matching chord wins; on a tie, prefer more processing."""
+    matches = [(name, chord) for name, chord in chords.items() if chord.matches(pressed)]
+    if not matches:
+        return None
+    matches.sort(
+        key=lambda item: (len(item[1].parts), _MODE_RANK.get(item[0], 0)),
+        reverse=True,
+    )
+    return matches[0][0]
+
+
 def parse_hotkey(spec: str) -> HotkeyChord:
     raw = [normalize_hotkey_name(p) for p in re.split(r"[+\s]+", spec.strip()) if p]
     if not raw:
@@ -222,31 +237,42 @@ def _forget_key(pressed: set, key) -> None:
 
 
 class HoldListener:
-    """Restartable hold-to-talk listener. Supports chords such as command+option."""
+    """Restartable hold-to-talk listener for one or more named chords."""
 
     def __init__(
         self,
-        on_press: Callable[[], None],
+        on_press: Callable[[str], None],
         on_release: Callable[[], None],
     ):
         self._on_press = on_press
         self._on_release = on_release
         self._listener: keyboard.Listener | None = None
-        self._held = False
+        self._held: str | None = None
 
-    def start(self, hotkey_name: str) -> None:
+    def start(self, chords: dict[str, str] | str) -> None:
         self.stop()
-        chord = parse_hotkey(hotkey_name)
+        if isinstance(chords, str):
+            chords = {"transcript": chords}
+        parsed: dict[str, HotkeyChord] = {}
+        for name, spec in chords.items():
+            if not spec or not str(spec).strip():
+                continue
+            parsed[name] = parse_hotkey(spec)
+        if not parsed:
+            return
         pressed: set = set()
 
         def _sync() -> None:
-            active = chord.matches(pressed)
-            if active and not self._held:
-                self._held = True
-                self._on_press()
-            elif not active and self._held:
-                self._held = False
-                self._on_release()
+            if self._held:
+                chord = parsed.get(self._held)
+                if chord is None or not chord.matches(pressed):
+                    self._held = None
+                    self._on_release()
+                return
+            mode = select_mode(pressed, parsed)
+            if mode:
+                self._held = mode
+                self._on_press(mode)
 
         def _press(key) -> None:
             pressed.add(key)
@@ -259,12 +285,12 @@ class HoldListener:
         self._listener = keyboard.Listener(on_press=_press, on_release=_release)
         self._listener.start()
 
-    def restart(self, hotkey_name: str) -> None:
-        self.start(hotkey_name)
+    def restart(self, chords: dict[str, str] | str) -> None:
+        self.start(chords)
 
     def stop(self) -> None:
-        if self._held:
-            self._held = False
+        if self._held is not None:
+            self._held = None
             try:
                 self._on_release()
             except Exception:
@@ -276,11 +302,11 @@ class HoldListener:
 
 
 def start_hold_listener(
-    hotkey_name: str,
+    chords: dict[str, str] | str,
     *,
-    on_press: Callable[[], None],
+    on_press: Callable[[str], None],
     on_release: Callable[[], None],
 ) -> HoldListener:
     listener = HoldListener(on_press, on_release)
-    listener.start(hotkey_name)
+    listener.start(chords)
     return listener

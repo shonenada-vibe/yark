@@ -88,6 +88,7 @@ class YarkAppDelegate(NSObject):
     settings_window = objc.ivar()
     shortcut_display = objc.ivar()
     record_button = objc.ivar()
+    record_buttons = objc.ivar()
     hint = objc.ivar()
     local_monitor = objc.ivar()
     global_monitor = objc.ivar()
@@ -118,6 +119,9 @@ class YarkAppDelegate(NSObject):
         self.settings_window = None
         self.shortcut_display = None
         self.record_button = None
+        self.record_buttons = None
+        self._record_slot = "transcript"
+        self.shortcut_displays: dict = {}
         self.hint = None
         self.base_url_field = None
         self.model_field = None
@@ -197,11 +201,16 @@ class YarkAppDelegate(NSObject):
         if self.recording:
             self._stop_recording()
             return
+        slots = ("transcript", "translate", "refine")
+        tag = int(sender.tag()) if sender is not None else 0
+        self._record_slot = slots[tag] if 0 <= tag < len(slots) else "transcript"
         self.runtime.pause_hotkey()
         self.recording = True
         self._record_down = set()
         self._record_peak = set()
-        self.record_button.setTitle_("Hold keys, then release… (Esc cancels)")
+        self.record_button = sender
+        if sender is not None:
+            sender.setTitle_("Hold keys…")
         self._update_record_preview()
 
         def local_handler(event):
@@ -241,11 +250,12 @@ class YarkAppDelegate(NSObject):
                 self.status_item.setLength_(NSVariableStatusItemLength)
                 button.setImage_(None)
                 button.setTitle_("●" if self._listening else "Yark")
-            status = "Listening…" if self._listening else "Ready"
+            mode = self.runtime.session_mode if self._listening else ""
+            status = f"Listening… {_mode_title(mode)}" if self._listening else "Ready"
             self.status_line.setTitle_(status)
-            label = hotkey_label(self.runtime.hotkey)
-            self.shortcut_line.setTitle_(f"Hold {label} to dictate")
-            button.setToolTip_(f"yark — {status.lower()}. Hold {label} to dictate.")
+            summary = _shortcut_summary(self.runtime.cfg.input.hotkey_map())
+            self.shortcut_line.setTitle_(summary)
+            button.setToolTip_(f"yark — {status}. {summary}")
             self._sync_shortcut_display()
 
         _on_main(apply)
@@ -264,7 +274,7 @@ class YarkAppDelegate(NSObject):
         menu.addItem_(status)
 
         shortcut = NSMenuItem.alloc().initWithTitle_action_keyEquivalent_(
-            f"Hold {hotkey_label(self.runtime.hotkey)} to dictate", None, ""
+            _shortcut_summary(self.runtime.cfg.input.hotkey_map()), None, ""
         )
         shortcut.setEnabled_(False)
         menu.addItem_(shortcut)
@@ -357,31 +367,45 @@ class YarkAppDelegate(NSObject):
 
     def _build_shortcut_tab(self) -> NSView:
         view = NSView.alloc().initWithFrame_(NSMakeRect(0, 0, 480, 340))
-        title = _label("Hold-to-talk shortcut", NSMakeRect(16, 292, 448, 22), bold=True)
+        title = _label("Hold-to-talk shortcuts", NSMakeRect(16, 308, 448, 22), bold=True)
         view.addSubview_(title)
 
-        display = NSTextField.alloc().initWithFrame_(NSMakeRect(16, 248, 448, 32))
-        display.setEditable_(False)
-        display.setBezeled_(True)
-        display.setAlignment_(NSTextAlignmentCenter)
-        display.setFont_(NSFont.systemFontOfSize_(16.0))
-        view.addSubview_(display)
+        rows = (
+            ("transcript", "1. Transcript"),
+            ("translate", "2. Translate"),
+            ("refine", "3. Translate + Refine"),
+        )
+        displays: dict[str, object] = {}
+        buttons: dict[str, object] = {}
+        top = 270
+        for index, (slot, caption) in enumerate(rows):
+            y = top - index * 70
+            view.addSubview_(_label(caption, NSMakeRect(16, y + 28, 448, 18), bold=True))
+            display = NSTextField.alloc().initWithFrame_(NSMakeRect(16, y, 320, 26))
+            display.setEditable_(False)
+            display.setBezeled_(True)
+            display.setAlignment_(NSTextAlignmentCenter)
+            view.addSubview_(display)
+            record = NSButton.alloc().initWithFrame_(NSMakeRect(344, y - 2, 120, 30))
+            record.setTitle_("Record")
+            record.setBezelStyle_(NSBezelStyleRounded)
+            record.setTarget_(self)
+            record.setAction_("recordShortcut:")
+            record.setTag_(index)
+            view.addSubview_(record)
+            displays[slot] = display
+            buttons[slot] = record
 
-        record = NSButton.alloc().initWithFrame_(NSMakeRect(16, 204, 448, 32))
-        record.setTitle_("Record shortcut")
-        record.setBezelStyle_(NSBezelStyleRounded)
-        record.setTarget_(self)
-        record.setAction_("recordShortcut:")
-        view.addSubview_(record)
-
-        hint = _label(_shortcut_hint(), NSMakeRect(16, 16, 448, 170))
+        hint = _label(_shortcut_hint(), NSMakeRect(16, 8, 448, 56))
         hint.setTextColor_(NSColor.secondaryLabelColor())
-        hint.setMaximumNumberOfLines_(8)
+        hint.setMaximumNumberOfLines_(4)
         hint.setLineBreakMode_(NSLineBreakByWordWrapping)
         view.addSubview_(hint)
 
-        self.shortcut_display = display
-        self.record_button = record
+        self.shortcut_displays = displays
+        self.record_buttons = buttons
+        self.shortcut_display = displays.get("transcript")
+        self.record_button = buttons.get("transcript")
         self.hint = hint
         self._sync_shortcut_display()
         return view
@@ -458,24 +482,33 @@ class YarkAppDelegate(NSObject):
             logger.exception("failed to save LLM settings")
 
     def _sync_shortcut_display(self) -> None:
-        if self.shortcut_display is None:
-            return
+        displays = getattr(self, "shortcut_displays", None) or {}
         if self.recording:
             return
-        self.shortcut_display.setStringValue_(hotkey_label(self.runtime.hotkey))
+        mapping = self.runtime.cfg.input.hotkey_map()
+        for slot, display in displays.items():
+            spec = mapping.get(slot, "")
+            display.setStringValue_(hotkey_label(spec) if spec else "Not set")
+        if self.shortcut_display is not None and not displays:
+            self.shortcut_display.setStringValue_(hotkey_label(self.runtime.hotkey))
 
     def _update_record_preview(self) -> None:
-        if self.shortcut_display is None:
+        displays = getattr(self, "shortcut_displays", None) or {}
+        display = displays.get(getattr(self, "_record_slot", "transcript"))
+        if display is None:
+            display = self.shortcut_display
+        if display is None:
             return
         current = self._record_down or self._record_peak
         if current:
-            self.shortcut_display.setStringValue_(hotkey_label(format_chord(current)))
+            display.setStringValue_(hotkey_label(format_chord(current)))
         else:
-            self.shortcut_display.setStringValue_("Waiting for keys…")
+            display.setStringValue_("Waiting for keys…")
 
     def _apply_hotkey(self, name: str) -> bool:
+        slot = getattr(self, "_record_slot", "transcript") or "transcript"
         try:
-            self.runtime.set_hotkey(name)
+            self.runtime.set_hotkey(name, slot)
         except ConfigError as exc:
             logger.warning("cannot set shortcut: %s", exc)
             return False
@@ -530,8 +563,11 @@ class YarkAppDelegate(NSObject):
         if self.global_monitor is not None:
             NSEvent.removeMonitor_(self.global_monitor)
             self.global_monitor = None
-        if self.record_button is not None:
-            self.record_button.setTitle_("Record shortcut")
+        buttons = getattr(self, "record_buttons", None) or {}
+        for button in buttons.values():
+            button.setTitle_("Record")
+        if self.record_button is not None and not buttons:
+            self.record_button.setTitle_("Record")
         self._sync_shortcut_display()
         if was_recording and resume:
             self.runtime.resume_hotkey()
@@ -714,10 +750,27 @@ def _label(text: str, frame, *, bold: bool = False) -> NSTextField:
     return field
 
 
+def _mode_title(mode: str) -> str:
+    return {
+        "transcript": "Transcript",
+        "translate": "Translate",
+        "refine": "Translate + Refine",
+    }.get(mode, mode or "Transcript")
+
+
+def _shortcut_summary(mapping: dict[str, str]) -> str:
+    parts = []
+    for slot in ("transcript", "translate", "refine"):
+        spec = mapping.get(slot)
+        if spec:
+            parts.append(f"{_mode_title(slot)} {hotkey_label(spec)}")
+    return " · ".join(parts) if parts else "No shortcuts set"
+
+
 def _shortcut_hint() -> str:
     hint = (
-        "Hold the shortcut to dictate, release to stop. "
-        "Record a chord such as ⌘ + ⌥. Saved to config.toml."
+        "Three hold-to-talk levels: transcript, translate, or translate+refine. "
+        "Longer chords win if they overlap. Saved to config.toml."
     )
     if os.environ.get("YARK_HOTKEY"):
         hint += " YARK_HOTKEY is set and will override this on the next launch."
