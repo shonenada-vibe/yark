@@ -4,6 +4,8 @@ set dotenv-load := false
 # Create .venv and install the package plus test extras.
 setup:
     uv sync --extra dev
+    @echo "yark is in .venv (not on PATH). Run: uv run yark listen"
+    @echo "Or: source .venv/bin/activate"
 
 # Run unit tests. Extra args go to pytest, e.g. `just test -k protocol`.
 [positional-arguments]

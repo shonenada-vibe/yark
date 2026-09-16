@@ -221,4 +221,4 @@ def _cmd_init(args) -> None:
         return
     write_example_config(path)
     print(f"wrote {path}")
-    print("Fill in volcengine.api_key, then run: yark doctor && yark listen")
+    print("Fill in volcengine.api_key, then run: uv run yark doctor && uv run yark listen")

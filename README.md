@@ -14,11 +14,11 @@ First version talks to [Volcengine bidirectional streaming ASR](https://docs.vol
 ## Setup
 
 ```bash
-python3 -m venv .venv
-source .venv/bin/activate
-pip install -e ".[dev]"
-yark init-config
+uv sync --extra dev
+uv run yark init-config
 ```
+
+`uv sync` installs `yark` into `.venv`, not onto your PATH. Use `uv run yark …`, or `source .venv/bin/activate` and then `yark`. `just listen` / `just wsl` already wrap `uv run`.
 
 Put your Volcengine API key in `~/.config/yark/config.toml`:
 
@@ -39,8 +39,8 @@ macOS permissions (both are required for typing):
 - **Accessibility** — same pane → Accessibility. Needed for the global hotkey and for inserting text.
 
 ```bash
-yark doctor
-yark listen
+uv run yark doctor
+uv run yark listen
 ```
 
 `yark listen` puts a mic icon in the macOS menu bar. Three hold-to-talk shortcuts (Settings → Shortcut):
@@ -56,9 +56,9 @@ Click the icon → **Settings…** → **Record** next to each level. Quit from 
 Run yark **inside WSL**. A PowerShell helper on the Windows side watches the hotkeys and pastes into the focused Windows app.
 
 ```bash
-yark wsl
+uv run yark wsl
 # or, from WSL / native Windows:
-yark listen
+uv run yark listen
 ```
 
 Same `~/.config/yark/config.toml` as macOS. Key names map as:
@@ -72,22 +72,21 @@ Same `~/.config/yark/config.toml` as macOS. Key names map as:
 Default typing is clipboard + Ctrl+V (Chinese-safe). `unicode` is treated as paste. Microphone uses WSL PulseAudio/WSLg when available; otherwise the Windows default recording device (`audio.device = "windows"` forces that). Allow microphone access for desktop apps in Windows Settings.
 
 ```bash
-yark wsl --doctor
-yark wsl --hotkey f8
-yark-wsl
+uv run yark wsl --doctor
+uv run yark wsl --hotkey f8
 ```
 
 ## Commands
 
 ```bash
-yark listen                 # macOS menu bar, or WSL/Windows hold-to-talk
-yark listen --print         # same, but print instead of typing
-yark listen --hotkey f8
-yark wsl                    # Windows hold-to-talk from WSL
-yark wsl --doctor
-yark once --print           # record until Enter
-yark doctor
-yark init-config
+uv run yark listen                 # macOS menu bar, or WSL/Windows hold-to-talk
+uv run yark listen --print         # same, but print instead of typing
+uv run yark listen --hotkey f8
+uv run yark wsl                    # Windows hold-to-talk from WSL
+uv run yark wsl --doctor
+uv run yark once --print           # record until Enter
+uv run yark doctor
+uv run yark init-config
 ```
 
 The menu bar extra shows Ready vs Listening. **Settings…** (or ⌘,) has three tabs:
