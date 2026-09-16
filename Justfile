@@ -15,6 +15,11 @@ test *args:
 listen *args:
     uv run yark listen "$@"
 
+# Windows hold-to-talk from WSL. Extra args go to `yark wsl`.
+[positional-arguments]
+wsl *args:
+    uv run yark wsl "$@"
+
 # Hold-to-talk, print transcript instead of typing.
 [positional-arguments]
 print *args:

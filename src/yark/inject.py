@@ -1,4 +1,4 @@
-"""Insert recognized text into the focused macOS application."""
+"""Insert recognized text into the focused application."""
 
 from __future__ import annotations
 
@@ -21,7 +21,13 @@ def inject_text(text: str, mode: str) -> None:
         print(text, end="", flush=True)
         return
     if not IS_MAC:
-        raise YarkError("text injection is only implemented on macOS")
+        from yark.winbridge import inject_text as win_inject
+        from yark.winbridge import on_windows_host
+
+        if on_windows_host():
+            win_inject(text, "paste" if mode == "unicode" else mode)
+            return
+        raise YarkError("text injection is only implemented on macOS and Windows/WSL")
     if mode == "paste":
         _paste(text)
         return
@@ -87,6 +93,15 @@ def _paste(text: str) -> None:
 
 def beep() -> None:
     if not IS_MAC:
+        try:
+            from yark.winbridge import beep as win_beep
+            from yark.winbridge import on_windows_host
+
+            if on_windows_host():
+                win_beep()
+                return
+        except Exception:
+            pass
         print("\a", end="", flush=True)
         return
     try:

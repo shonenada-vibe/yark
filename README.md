@@ -1,6 +1,6 @@
 # yark
 
-macOS voice-to-text input. Hold a hotkey, speak, and yark types the transcript into the focused app.
+Voice-to-text input for macOS and Windows (via WSL). Hold a hotkey, speak, and yark types the transcript into the focused app.
 
 First version talks to [Volcengine bidirectional streaming ASR](https://docs.volcengine.com/docs/6561/2630027) (`wss://openspeech.bytedance.com/api/v3/sauc/bigmodel_async`, Seed-ASR 2.0).
 
@@ -51,12 +51,40 @@ yark listen
 
 Click the icon → **Settings…** → **Record** next to each level. Quit from the menu, or Ctrl+C.
 
+## Windows (WSL)
+
+Run yark **inside WSL**. A PowerShell helper on the Windows side watches the hotkeys and pastes into the focused Windows app.
+
+```bash
+yark wsl
+# or, from WSL / native Windows:
+yark listen
+```
+
+Same `~/.config/yark/config.toml` as macOS. Key names map as:
+
+| config | Windows |
+| --- | --- |
+| `option` / `right_option` | Alt / Right Alt |
+| `command` | Win |
+| `control` | Ctrl |
+
+Default typing is clipboard + Ctrl+V (Chinese-safe). `unicode` is treated as paste. Microphone uses WSL PulseAudio/WSLg when available; otherwise the Windows default recording device (`audio.device = "windows"` forces that). Allow microphone access for desktop apps in Windows Settings.
+
+```bash
+yark wsl --doctor
+yark wsl --hotkey f8
+yark-wsl
+```
+
 ## Commands
 
 ```bash
-yark listen                 # menu bar + hold-to-talk
+yark listen                 # macOS menu bar, or WSL/Windows hold-to-talk
 yark listen --print         # same, but print instead of typing
 yark listen --hotkey f8
+yark wsl                    # Windows hold-to-talk from WSL
+yark wsl --doctor
 yark once --print           # record until Enter
 yark doctor
 yark init-config

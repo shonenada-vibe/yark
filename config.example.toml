@@ -25,6 +25,7 @@ endpoint = "wss://openspeech.bytedance.com/api/v3/sauc/bigmodel_async"
 sample_rate = 16000
 chunk_ms = 200
 # Empty uses the system default input device.
+# From WSL, set "windows" to capture the Windows recording device.
 device = ""
 
 [input]
@@ -36,10 +37,11 @@ hotkey = "right_option"
 hotkey_transcript = "right_option"
 hotkey_translate = "command+option"
 hotkey_refine = "command+shift+option"
-# unicode = live keystrokes (Chinese-safe)
-# paste   = clipboard Cmd+V per committed phrase
+# unicode = live keystrokes (Chinese-safe; macOS)
+# paste   = clipboard paste per committed phrase (Windows/WSL default)
 # print   = stdout only (no typing)
 inject = "unicode"
+# Windows/WSL: option=Alt, command=Win, control=Ctrl. unicode is treated as paste.
 beep = true
 
 [stt]

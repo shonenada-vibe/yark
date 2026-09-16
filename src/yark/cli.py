@@ -34,7 +34,7 @@ def main(argv: list[str] | None = None) -> None:
 def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="yark",
-        description="macOS voice-to-text input (Volcengine streaming ASR)",
+        description="Voice-to-text input (Volcengine streaming ASR)",
     )
     parser.add_argument("--version", action="version", version=f"yark {__version__}")
     parser.add_argument(
@@ -50,6 +50,15 @@ def _build_parser() -> argparse.ArgumentParser:
     listen.add_argument("--print", dest="print_only", action="store_true", help="print instead of typing")
     listen.add_argument("--hotkey", help="override hold-to-talk key")
     listen.set_defaults(handler=_cmd_listen)
+
+    wsl = sub.add_parser(
+        "wsl",
+        help="Windows hold-to-talk from WSL (PowerShell keys + clipboard paste)",
+    )
+    wsl.add_argument("--print", dest="print_only", action="store_true")
+    wsl.add_argument("--hotkey", help="override hold-to-talk key")
+    wsl.add_argument("--doctor", action="store_true")
+    wsl.set_defaults(handler=_cmd_wsl)
 
     once = sub.add_parser("once", help="record until Enter, then print / type the result")
     once.add_argument("--print", dest="print_only", action="store_true")
@@ -76,8 +85,6 @@ def _require_auth(cfg: AppConfig) -> None:
 def _cmd_listen(args) -> None:
     from dataclasses import replace
 
-    from yark.app import run_listener
-
     cfg = _load(args)
     _require_auth(cfg)
     if args.hotkey:
@@ -88,7 +95,31 @@ def _cmd_listen(args) -> None:
             ),
         )
     mode = "print" if args.print_only else cfg.input.inject
+    if sys.platform != "darwin":
+        from yark.wsl import run_wsl_listener
+
+        run_wsl_listener(cfg, inject_mode=mode)
+        return
+    from yark.app import run_listener
+
     run_listener(cfg, inject_mode=mode)
+
+
+def _cmd_wsl(args) -> None:
+    from yark.wsl import main as wsl_main
+
+    argv: list[str] = []
+    if getattr(args, "verbose", False):
+        argv.append("-v")
+    if args.config:
+        argv.extend(["-c", str(args.config)])
+    if args.print_only:
+        argv.append("--print")
+    if args.hotkey:
+        argv.extend(["--hotkey", args.hotkey])
+    if args.doctor:
+        argv.append("--doctor")
+    wsl_main(argv)
 
 
 def _cmd_once(args) -> None:
@@ -112,10 +143,16 @@ async def _once(cfg: AppConfig, mode: str) -> None:
     texts: list[str] = []
     try:
         from yark.llm import LlmPipeline
+        from yark.winbridge import on_windows_host, open_microphone
 
+        microphone = None
+        if on_windows_host():
+            microphone = open_microphone(
+                cfg.audio.sample_rate, cfg.audio.chunk_ms, cfg.audio.device
+            )
         pipeline = LlmPipeline(cfg.llm)
         buffered: list[str] = []
-        async for piece in transcribe_until(cfg, stop):
+        async for piece in transcribe_until(cfg, stop, microphone=microphone):
             if pipeline.enabled():
                 buffered.append(piece)
             else:
@@ -163,6 +200,12 @@ def _cmd_doctor(args) -> None:
         print(f"auth: MISSING ({exc})")
     print("microphone permission:", "ok" if check_microphone() else "not granted / unknown")
     print("accessibility permission:", "ok" if check_accessibility(prompt=False) else "not granted")
+    from yark.winbridge import doctor_lines, on_windows_host
+
+    if on_windows_host():
+        print("windows bridge:")
+        for line in doctor_lines():
+            print(f"  {line}")
     print("input devices:")
     try:
         for row in list_input_devices():

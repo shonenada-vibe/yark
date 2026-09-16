@@ -19,10 +19,12 @@ async def transcribe_until(
     stop: asyncio.Event,
     *,
     on_partial: Callable[[str], None] | None = None,
+    microphone=None,
 ) -> AsyncIterator[str]:
     """Yield committed phrases until `stop` is set and the server finishes."""
     committer = TranscriptCommitter()
-    async with Microphone(cfg.audio) as mic, VolcengineStt(cfg) as stt:
+    mic_cm = microphone if microphone is not None else Microphone(cfg.audio)
+    async with mic_cm as mic, VolcengineStt(cfg) as stt:
         watcher = asyncio.create_task(_stop_mic_when(stop, mic), name="yark-stop-mic")
         send_task = asyncio.create_task(_pump_audio(mic, stt), name="yark-send")
         try:

@@ -5,7 +5,7 @@ build-backend = "hatchling.build"
 [project]
 name = "yark"
 version = "0.1.0"
-description = "macOS voice-to-text input powered by Volcengine streaming ASR"
+description = "Voice-to-text input powered by Volcengine streaming ASR (macOS and Windows/WSL)"
 readme = "README.md"
 requires-python = ">=3.11"
 license = { text = "MIT" }
@@ -14,11 +14,11 @@ dependencies = [
   "websockets>=12.0",
   "sounddevice>=0.5.0",
   "numpy>=1.26.0",
-  "pyobjc-framework-Cocoa>=10.0",
-  "pyobjc-framework-Quartz>=10.0",
-  "pyobjc-framework-ApplicationServices>=10.0",
-  "pyobjc-framework-AVFoundation>=10.0",
   "tomlkit>=0.13.0",
+  "pyobjc-framework-Cocoa>=10.0; sys_platform == 'darwin'",
+  "pyobjc-framework-Quartz>=10.0; sys_platform == 'darwin'",
+  "pyobjc-framework-ApplicationServices>=10.0; sys_platform == 'darwin'",
+  "pyobjc-framework-AVFoundation>=10.0; sys_platform == 'darwin'",
 ]
 
 [project.optional-dependencies]
@@ -26,6 +26,10 @@ dev = ["pytest>=8.0"]
 
 [project.scripts]
 yark = "yark.cli:main"
+yark-wsl = "yark.wsl:main"
+
+[tool.hatch.build.targets.wheel.force-include]
+"src/yark/win_host.ps1" = "yark/win_host.ps1"
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
