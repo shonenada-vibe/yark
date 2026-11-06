@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import sys
 from collections.abc import AsyncIterator
 
 import numpy as np
@@ -36,14 +37,14 @@ class Microphone:
         self._queue = asyncio.Queue(maxsize=32)
         self._stopped = False
         blocksize = max(1, self._audio.sample_rate * self._audio.chunk_ms // 1000)
-        device = _resolve_device(self._audio.device)
-        logger.info(
-            "mic start device=%s rate=%s chunk_ms=%s",
-            device if device is not None else "default",
-            self._audio.sample_rate,
-            self._audio.chunk_ms,
-        )
         try:
+            device = _resolve_device(self._audio.device)
+            logger.info(
+                "mic start device=%s rate=%s chunk_ms=%s",
+                device if device is not None else "default",
+                self._audio.sample_rate,
+                self._audio.chunk_ms,
+            )
             self._stream = sd.InputStream(
                 samplerate=self._audio.sample_rate,
                 channels=1,
@@ -54,10 +55,23 @@ class Microphone:
             )
             self._stream.start()
         except Exception as exc:
-            raise YarkError(
-                f"cannot open microphone: {exc}. Grant Microphone permission to "
-                "the terminal / Python in System Settings → Privacy & Security."
-            ) from exc
+            self._close_stream()
+            self._stopped = True
+            self._queue = None
+            self._loop = None
+            message = (
+                f"cannot open microphone: {exc}. "
+                f"Input device={self._audio.device or 'default'}, "
+                f"{self._audio.sample_rate} Hz, mono. "
+                "Check the input device in [audio].device and run "
+                "`uv run yark doctor --test-mic` from the same terminal."
+            )
+            if sys.platform == "darwin":
+                message += (
+                    " Also check the launching app's Microphone permission in "
+                    "System Settings → Privacy & Security → Microphone."
+                )
+            raise YarkError(message) from exc
 
     async def chunks(self) -> AsyncIterator[bytes]:
         if self._queue is None:
@@ -73,43 +87,52 @@ class Microphone:
             return
         self._stopped = True
         stream = self._stream
-        self._stream = None
         if stream is not None:
             try:
                 stream.stop()
-                stream.close()
             except Exception:
-                logger.debug("mic stream close failed", exc_info=True)
+                logger.debug("mic stream stop failed", exc_info=True)
+            finally:
+                self._close_stream()
         if self._queue is not None:
             try:
                 self._queue.put_nowait(_SENTINEL)
             except asyncio.QueueFull:
                 pass
 
+    def _close_stream(self) -> None:
+        stream = self._stream
+        self._stream = None
+        if stream is not None:
+            try:
+                stream.close()
+            except Exception:
+                logger.debug("mic stream close failed", exc_info=True)
+
     def _callback(self, indata, frames, time_info, status) -> None:  # noqa: ARG002
         if status:
             logger.debug("mic status: %s", status)
-        if self._loop is None or self._queue is None:
+        loop, queue = self._loop, self._queue
+        if loop is None or queue is None:
             return
         pcm = np.ascontiguousarray(indata, dtype=np.int16).tobytes()
         if not pcm:
             return
 
         def _put() -> None:
-            assert self._queue is not None
             try:
-                self._queue.put_nowait(pcm)
+                queue.put_nowait(pcm)
             except asyncio.QueueFull:
                 try:
-                    self._queue.get_nowait()
+                    queue.get_nowait()
                 except asyncio.QueueEmpty:
                     pass
                 try:
-                    self._queue.put_nowait(pcm)
+                    queue.put_nowait(pcm)
                 except asyncio.QueueFull:
                     pass
 
-        self._loop.call_soon_threadsafe(_put)
+        loop.call_soon_threadsafe(_put)
 
 
 def _resolve_device(name: str) -> int | None:
@@ -131,8 +154,7 @@ def _resolve_device(name: str) -> int | None:
 
 def list_input_devices() -> list[str]:
     rows = []
-    default = sd.default.device
-    default_in = default[0] if isinstance(default, (list, tuple)) else default
+    default_in = sd.default.device[0]
     for index, info in enumerate(sd.query_devices()):
         if info.get("max_input_channels", 0) <= 0:
             continue

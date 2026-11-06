@@ -86,8 +86,18 @@ uv run yark wsl                    # Windows hold-to-talk from WSL
 uv run yark wsl --doctor
 uv run yark once --print           # record until Enter
 uv run yark doctor
+uv run yark doctor --test-mic       # briefly test capture locally; audio is discarded
 uv run yark init-config
 ```
+
+If microphone capture fails, run `uv run yark doctor --test-mic` from the same
+terminal or app that launches yark. This tests your configured device without
+contacting the speech service or requiring an API key. PortAudio's `-9986`
+(`Internal PortAudio error`) alone does not identify a permission problem.
+Check the launching app's Microphone permission on macOS and the input device
+shown by doctor. To select another input, set `device = "device name"` (or its
+listed index as a string) in the `[audio]` section of your config. Restart yark
+after changing audio devices or permissions.
 
 The menu bar extra shows Ready vs Listening. **Settings…** (or ⌘,) has three tabs:
 

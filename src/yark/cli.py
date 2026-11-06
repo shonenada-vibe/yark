@@ -7,10 +7,10 @@ import sys
 from pathlib import Path
 
 from yark import __version__
-from yark.config import AppConfig, load_config, write_example_config
+from yark.config import AppConfig, AudioConfig, load_config, write_example_config
 from yark.errors import ConfigError, YarkError
 from yark.inject import inject_text
-from yark.mic import list_input_devices
+from yark.mic import Microphone, list_input_devices
 from yark.permissions import check_accessibility, check_microphone
 
 
@@ -65,6 +65,10 @@ def _build_parser() -> argparse.ArgumentParser:
     once.set_defaults(handler=_cmd_once)
 
     doctor = sub.add_parser("doctor", help="check config, mic, and macOS permissions")
+    doctor.add_argument(
+        "--test-mic", action="store_true",
+        help="briefly capture and discard audio locally to test the configured microphone",
+    )
     doctor.set_defaults(handler=_cmd_doctor)
 
     init = sub.add_parser("init-config", help="write ~/.config/yark/config.toml")
@@ -212,6 +216,28 @@ def _cmd_doctor(args) -> None:
             print(f"  {row}")
     except Exception as exc:
         print(f"  (cannot list devices: {exc})")
+    if args.test_mic:
+        print(
+            f"testing microphone: device={cfg.audio.device or 'default'} "
+            f"rate={cfg.audio.sample_rate} Hz chunk_ms={cfg.audio.chunk_ms}",
+            flush=True,
+        )
+        size = asyncio.run(_probe_microphone(cfg.audio))
+        print(f"microphone capture: ok ({size} PCM bytes received and discarded)")
+
+
+async def _probe_microphone(audio: AudioConfig) -> int:
+    async with Microphone(audio) as mic:
+        try:
+            chunk = await asyncio.wait_for(
+                anext(mic.chunks()), timeout=max(3.0, audio.chunk_ms / 1000 + 1.0)
+            )
+        except TimeoutError as exc:
+            raise YarkError(
+                "microphone opened but delivered no audio before the timeout. "
+                "Check the input device connection and [audio].device."
+            ) from exc
+        return len(chunk)
 
 
 def _cmd_init(args) -> None:
