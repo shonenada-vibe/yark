@@ -5,12 +5,16 @@ from __future__ import annotations
 import asyncio
 import logging
 from collections.abc import AsyncIterator
+from types import ModuleType
+from typing import TYPE_CHECKING
 
 import numpy as np
-import sounddevice as sd
 
 from yark.config import AudioConfig
 from yark.errors import YarkError
+
+if TYPE_CHECKING:
+    from sounddevice import InputStream
 
 logger = logging.getLogger("yark.mic")
 _SENTINEL = object()
@@ -20,7 +24,7 @@ class Microphone:
     def __init__(self, audio: AudioConfig):
         self._audio = audio
         self._queue: asyncio.Queue[object] | None = None
-        self._stream: sd.InputStream | None = None
+        self._stream: InputStream | None = None
         self._loop: asyncio.AbstractEventLoop | None = None
         self._stopped = False
 
@@ -32,11 +36,12 @@ class Microphone:
         await self.stop()
 
     async def start(self) -> None:
+        sd = _load_sounddevice()
         self._loop = asyncio.get_running_loop()
         self._queue = asyncio.Queue(maxsize=32)
         self._stopped = False
         blocksize = max(1, self._audio.sample_rate * self._audio.chunk_ms // 1000)
-        device = _resolve_device(self._audio.device)
+        device = _resolve_device(self._audio.device, sd)
         logger.info(
             "mic start device=%s rate=%s chunk_ms=%s",
             device if device is not None else "default",
@@ -112,7 +117,15 @@ class Microphone:
         self._loop.call_soon_threadsafe(_put)
 
 
-def _resolve_device(name: str) -> int | None:
+def _load_sounddevice() -> ModuleType:
+    try:
+        import sounddevice
+    except (ImportError, OSError) as exc:
+        raise YarkError(f"cannot load PortAudio microphone backend: {exc}") from exc
+    return sounddevice
+
+
+def _resolve_device(name: str, sd: ModuleType) -> int | None:
     if not name:
         return None
     try:
@@ -130,6 +143,7 @@ def _resolve_device(name: str) -> int | None:
 
 
 def list_input_devices() -> list[str]:
+    sd = _load_sounddevice()
     rows = []
     default = sd.default.device
     default_in = default[0] if isinstance(default, (list, tuple)) else default
