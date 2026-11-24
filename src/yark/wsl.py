@@ -23,6 +23,7 @@ from yark.llm import LlmPipeline
 from yark.session import transcribe_until
 from yark.winbridge import (
     WinHoldListener,
+    WinTray,
     beep,
     doctor_lines,
     inject_text,
@@ -106,9 +107,9 @@ class WslRuntime:
         llm_error: BaseException | None = None
         llm_action: str | None = None
         pieces: list[str] = []
-        audio = self.cfg.audio
-        microphone = open_microphone(audio.sample_rate, audio.chunk_ms, audio.device)
         try:
+            audio = self.cfg.audio
+            microphone = open_microphone(audio.sample_rate, audio.chunk_ms, audio.device)
             pipeline = LlmPipeline(self.cfg.llm, proxy=self.cfg.network.proxy)
             dictation_mode = self._session_mode
             try:
@@ -171,20 +172,36 @@ def run_wsl_listener(cfg: AppConfig, *, inject_mode: str | None = None) -> None:
     thread = threading.Thread(target=loop.run_forever, daemon=True, name="yark-asyncio")
     thread.start()
     runtime = WslRuntime(cfg, mode, loop)
-    runtime.on_listening = _print_listening
+    stop = threading.Event()
+    tray = WinTray(stop.set)
+
+    def on_listening(listening: bool) -> None:
+        _print_listening(listening)
+        tray.set_listening(listening)
+
+    runtime.on_listening = on_listening
     runtime.on_error = _print_error
     try:
         runtime.start()
+        try:
+            tray.start()
+        except (OSError, YarkError, RuntimeError) as exc:
+            logger.warning("Cannot start Windows tray: %s", exc)
         print(
             f"yark wsl is running. Shortcuts: {runtime.cfg.input.hotkey_map()}. "
             "option=Alt, command=Win, control=Ctrl. Ctrl+C to quit.",
             flush=True,
         )
-        _wait_for_stop()
+        _wait_for_stop(stop)
     finally:
-        runtime.shutdown()
-        loop.call_soon_threadsafe(loop.stop)
-        thread.join(timeout=2)
+        try:
+            runtime.shutdown()
+        finally:
+            try:
+                tray.stop()
+            finally:
+                loop.call_soon_threadsafe(loop.stop)
+                thread.join(timeout=2)
         print("\nyark stopped.", flush=True)
 
 
@@ -199,16 +216,21 @@ def _print_error(message: str) -> None:
     print(f"yark: {message}", file=sys.stderr, flush=True)
 
 
-def _wait_for_stop() -> None:
-    stop = threading.Event()
+def _wait_for_stop(stop: threading.Event) -> None:
+    interrupted = False
 
     def _sigint(*_args) -> None:
-        stop.set()
+        nonlocal interrupted
+        interrupted = True
 
-    signal.signal(signal.SIGINT, _sigint)
-    signal.signal(signal.SIGTERM, _sigint)
-    while not stop.wait(0.25):
-        pass
+    previous_int = signal.signal(signal.SIGINT, _sigint)
+    previous_term = signal.signal(signal.SIGTERM, _sigint)
+    try:
+        while not interrupted and not stop.wait(0.25):
+            pass
+    finally:
+        signal.signal(signal.SIGINT, previous_int)
+        signal.signal(signal.SIGTERM, previous_term)
 
 
 def main(argv: list[str] | None = None) -> None:

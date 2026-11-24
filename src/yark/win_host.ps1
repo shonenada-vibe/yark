@@ -2,8 +2,9 @@
 # Modes:
 #   keys  — poll hold-to-talk keys, print "YARK keys …" lines
 #   mic   — capture default recording device as 16-bit PCM, print "YARK pcm <b64>"
+#   tray  — show status in the Windows notification area
 param(
-    [ValidateSet("keys", "mic")]
+    [ValidateSet("keys", "mic", "tray")]
     [string]$Mode = "keys",
     [int]$Rate = 16000,
     [int]$ChunkMs = 200
@@ -12,6 +13,76 @@ param(
 $ErrorActionPreference = "Stop"
 [Console]::OutputEncoding = New-Object System.Text.UTF8Encoding $false
 $OutputEncoding = [Console]::OutputEncoding
+
+if ($Mode -eq "tray") {
+    Add-Type -ReferencedAssemblies System.dll,System.Windows.Forms.dll,System.Drawing.dll -TypeDefinition @"
+using System;
+using System.Collections.Concurrent;
+using System.Drawing;
+using System.Threading;
+using System.Windows.Forms;
+
+public static class YarkTray {
+    public static void Run() {
+        var commands = new ConcurrentQueue<string>();
+        using (var context = new ApplicationContext())
+        using (var menu = new ContextMenuStrip())
+        using (var icon = new NotifyIcon())
+        using (var timer = new System.Windows.Forms.Timer()) {
+            menu.Items.Add("Exit yark", null, (sender, args) => {
+                Console.WriteLine("YARK tray quit");
+                Console.Out.Flush();
+                context.ExitThread();
+            });
+            icon.Icon = SystemIcons.Application;
+            icon.Text = "yark: Ready";
+            icon.ContextMenuStrip = menu;
+            icon.Visible = true;
+
+            var reader = new Thread(() => {
+                try {
+                    string line;
+                    while ((line = Console.ReadLine()) != null) {
+                        commands.Enqueue(line);
+                    }
+                } catch (System.IO.IOException) {
+                    // The WSL process closed the pipe.
+                } finally {
+                    commands.Enqueue("exit");
+                }
+            });
+            reader.IsBackground = true;
+            reader.Start();
+
+            timer.Interval = 50;
+            timer.Tick += (sender, args) => {
+                string command;
+                while (commands.TryDequeue(out command)) {
+                    if (command == "exit") {
+                        context.ExitThread();
+                        return;
+                    }
+                    if (command == "listening") {
+                        icon.Text = "yark: Listening";
+                        icon.Icon = SystemIcons.Information;
+                    } else if (command == "ready") {
+                        icon.Text = "yark: Ready";
+                        icon.Icon = SystemIcons.Application;
+                    }
+                }
+            };
+            timer.Start();
+            Console.WriteLine("YARK tray ready");
+            Console.Out.Flush();
+            Application.Run(context);
+            icon.Visible = false;
+        }
+    }
+}
+"@
+    [YarkTray]::Run()
+    return
+}
 
 if ($Mode -eq "keys") {
     Add-Type @"

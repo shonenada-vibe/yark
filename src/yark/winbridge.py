@@ -140,6 +140,72 @@ def beep() -> None:
         print("\a", end="", flush=True)
 
 
+class WinTray:
+    def __init__(self, on_quit: Callable[[], None]):
+        self._on_quit = on_quit
+        self._proc: subprocess.Popen[str] | None = None
+        self._reader: threading.Thread | None = None
+
+    def start(self) -> None:
+        script = windows_path(host_script_path())
+        proc = subprocess.Popen(
+            _powershell_base() + ["-STA", "-File", script, "-Mode", "tray"],
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            encoding="utf-8",
+            errors="replace",
+        )
+        self._proc = proc
+        self._reader = threading.Thread(
+            target=self._read, args=(proc,), daemon=True, name="yark-win-tray"
+        )
+        self._reader.start()
+
+    def set_listening(self, listening: bool) -> None:
+        proc = self._proc
+        if proc is None or proc.stdin is None or proc.poll() is not None:
+            return
+        try:
+            proc.stdin.write("listening\n" if listening else "ready\n")
+            proc.stdin.flush()
+        except (OSError, ValueError):
+            logger.debug("Windows tray pipe closed", exc_info=True)
+
+    def stop(self) -> None:
+        proc = self._proc
+        self._proc = None
+        if proc is None:
+            return
+        if proc.stdin is not None:
+            try:
+                proc.stdin.close()
+            except OSError:
+                pass
+        try:
+            proc.wait(timeout=2)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+            proc.wait(timeout=2)
+        if self._reader is not None:
+            self._reader.join(timeout=1)
+            self._reader = None
+
+    def _read(self, proc: subprocess.Popen[str]) -> None:
+        assert proc.stdout is not None
+        with proc.stdout:
+            for line in proc.stdout:
+                status = line.strip()
+                if status == "YARK tray quit":
+                    self._on_quit()
+                elif status == "YARK tray ready":
+                    logger.info("Windows notification area icon is ready")
+                elif status:
+                    logger.warning("Windows tray: %s", status)
+        if proc.wait() != 0 and self._proc is proc:
+            logger.warning("Windows tray helper exited with status %s", proc.returncode)
+
+
 class WinHoldListener:
     """Hold-to-talk via a PowerShell GetAsyncKeyState poller."""
 
@@ -253,7 +319,7 @@ class WinMicrophone:
             "-ChunkMs",
             str(self._chunk_ms),
             stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.STDOUT,
         )
         self._reader = asyncio.create_task(self._read(), name="yark-win-mic")
 
@@ -298,6 +364,7 @@ class WinMicrophone:
         proc = self._proc
         if proc is None or proc.stdout is None:
             return
+        received_audio = False
         try:
             while True:
                 line = await proc.stdout.readline()
@@ -305,12 +372,21 @@ class WinMicrophone:
                     break
                 text = line.decode("utf-8", errors="replace").strip()
                 if not text.startswith("YARK pcm "):
+                    if text.startswith("YARK mic started"):
+                        logger.debug("%s", text)
+                    elif text:
+                        logger.warning("Windows microphone helper: %s", text)
                     continue
                 try:
                     pcm = base64.b64decode(text[9:].strip())
                 except Exception:
                     continue
                 if pcm and self._queue is not None:
+                    if not received_audio:
+                        logger.debug(
+                            "Windows microphone received first PCM chunk (%s bytes)", len(pcm)
+                        )
+                        received_audio = True
                     try:
                         self._queue.put_nowait(pcm)
                     except asyncio.QueueFull:
@@ -322,6 +398,8 @@ class WinMicrophone:
                             self._queue.put_nowait(pcm)
                         except asyncio.QueueFull:
                             pass
+            if not self._stopped and not received_audio:
+                logger.warning("Windows microphone helper exited without sending audio")
         except asyncio.CancelledError:
             raise
         except Exception:

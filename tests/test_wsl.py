@@ -1,7 +1,9 @@
 import os
 import subprocess
 import sys
+import threading
 
+from yark import winbridge
 from yark.hotkey import parse_hotkey
 from yark.winbridge import host_script_path, parse_keys_line, running_in_wsl
 
@@ -34,6 +36,37 @@ def test_host_script_ships_with_package():
     assert "YARK keys" in text
     assert "YARK pcm" in text
     assert "GetAsyncKeyState" in text
+    assert "YARK tray ready" in text
+
+
+def test_windows_tray_sends_recording_state_and_handles_exit(monkeypatch):
+    helper = """
+import sys
+
+print('YARK tray ready', flush=True)
+assert sys.stdin.readline().strip() == 'listening'
+assert sys.stdin.readline().strip() == 'ready'
+print('YARK tray quit', flush=True)
+assert not sys.stdin.read()
+"""
+    start_process = subprocess.Popen
+
+    def start_tray(command, **kwargs):
+        assert command[-2:] == ["-Mode", "tray"]
+        return start_process([sys.executable, "-c", helper], **kwargs)
+
+    monkeypatch.setattr(winbridge, "_powershell_base", lambda: ["powershell.exe"])
+    monkeypatch.setattr(winbridge, "windows_path", str)
+    monkeypatch.setattr(winbridge.subprocess, "Popen", start_tray)
+    quit_requested = threading.Event()
+    tray = winbridge.WinTray(quit_requested.set)
+    tray.start()
+    try:
+        tray.set_listening(True)
+        tray.set_listening(False)
+        assert quit_requested.wait(timeout=2)
+    finally:
+        tray.stop()
 
 
 def test_running_in_wsl_false_outside_wsl(monkeypatch):

@@ -61,6 +61,8 @@ uv run yark wsl
 uv run yark listen
 ```
 
+Start from a terminal in your Windows desktop session. The yark icon shows Ready or Listening in the Windows notification area, including under the hidden icons arrow. Right-click the icon and choose **Exit yark**, or press Ctrl+C in the terminal.
+
 Same `~/.config/yark/config.toml` as macOS. Key names map as:
 
 | config | Windows |
