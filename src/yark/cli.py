@@ -13,6 +13,8 @@ from yark.inject import inject_text
 from yark.mic import list_input_devices
 from yark.permissions import check_accessibility, check_microphone
 
+logger = logging.getLogger("yark")
+
 
 def main(argv: list[str] | None = None) -> None:
     parser = _build_parser()
@@ -150,17 +152,20 @@ async def _once(cfg: AppConfig, mode: str) -> None:
             microphone = open_microphone(
                 cfg.audio.sample_rate, cfg.audio.chunk_ms, cfg.audio.device
             )
-        pipeline = LlmPipeline(cfg.llm)
+        pipeline = LlmPipeline(cfg.llm, proxy=cfg.network.proxy)
         buffered: list[str] = []
-        async for piece in transcribe_until(cfg, stop, microphone=microphone):
-            if pipeline.enabled():
-                buffered.append(piece)
-            else:
-                texts.append(piece)
-                if mode == "print":
-                    print(piece, end="", flush=True)
+        try:
+            async for piece in transcribe_until(cfg, stop, microphone=microphone):
+                if pipeline.enabled():
+                    buffered.append(piece)
                 else:
-                    inject_text(piece, mode)
+                    texts.append(piece)
+                    if mode == "print":
+                        print(piece, end="", flush=True)
+                    else:
+                        inject_text(piece, mode)
+        except Exception:
+            logger.exception("dictation session failed")
         if buffered:
             text = pipeline.apply("".join(buffered))
             texts.append(text)
@@ -191,8 +196,13 @@ def _cmd_doctor(args) -> None:
     )
     from yark.proxy import proxy_for_url, redact_proxy
 
-    proxy = proxy_for_url(cfg.volcengine.endpoint) or proxy_for_url(cfg.llm.base_url)
-    print(f"proxy: {redact_proxy(proxy) if proxy else '(none)'}")
+    proxy = proxy_for_url(
+        cfg.volcengine.endpoint, mode=cfg.network.proxy
+    ) or proxy_for_url(cfg.llm.base_url, mode=cfg.network.proxy)
+    print(
+        f"proxy: {redact_proxy(proxy) if proxy else 'direct'} "
+        f"(mode={cfg.network.proxy})"
+    )
     try:
         cfg.volcengine.auth_headers("doctor")
         print("auth: ok")

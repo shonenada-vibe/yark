@@ -1,18 +1,45 @@
-"""Honor HTTPS_PROXY / HTTP_PROXY / ALL_PROXY and NO_PROXY."""
+"""Resolve an optional HTTP proxy. Default is a direct connection.
+
+Local VPNs / Clash often export HTTPS_PROXY. Volcengine and other mainland
+hosts then go through that tunnel and stall or drop TLS. yark therefore
+ignores those variables unless proxy mode is ``env`` or an explicit URL.
+"""
 
 from __future__ import annotations
 
 import os
 from urllib.parse import urlparse, urlunparse
 
+_DIRECT = frozenset({"direct", "none", "off", "false", "0", "no", ""})
+_ENV = frozenset({"env", "auto", "system", "true", "1", "yes"})
 
-def proxy_for_url(url: str) -> str | None:
-    """Proxy URL to use for this request, or None to connect directly."""
+
+def proxy_for_url(url: str, mode: str = "direct") -> str | None:
+    """Proxy URL to use for this request, or None to connect directly.
+
+    ``mode`` is ``direct`` (ignore env proxies), ``env`` (HTTPS_PROXY / …),
+    or an explicit proxy URL such as ``http://127.0.0.1:7890``.
+    """
     host = (urlparse(url).hostname or "").lower()
-    if not host or bypass_proxy(host):
+    if not host:
         return None
+    resolved = _resolve_mode(mode)
+    if resolved in _DIRECT:
+        return None
+    if bypass_proxy(host):
+        return None
+    if resolved in _ENV:
+        return _env_proxy(url)
+    return resolved
+
+
+def _resolve_mode(mode: str) -> str:
+    raw = (mode or "direct").strip()
+    return raw.lower() if "://" not in raw else raw
+
+
+def _env_proxy(url: str) -> str | None:
     scheme = (urlparse(url).scheme or "").lower()
-    names: tuple[str, ...]
     if scheme in {"https", "wss"}:
         names = (
             "HTTPS_PROXY",

@@ -20,29 +20,39 @@ async def transcribe_until(
     *,
     on_partial: Callable[[str], None] | None = None,
     microphone=None,
+    stt=None,
 ) -> AsyncIterator[str]:
     """Yield committed phrases until `stop` is set and the server finishes."""
     committer = TranscriptCommitter()
     mic_cm = microphone if microphone is not None else Microphone(cfg.audio)
-    async with mic_cm as mic, VolcengineStt(cfg) as stt:
+    stt_cm = stt if stt is not None else VolcengineStt(cfg)
+    async with mic_cm as mic:
+        # Stop the mic as soon as the hotkey is released, including while the
+        # WebSocket handshake is still in progress. Otherwise the bounded mic
+        # queue fills and the last-audio packet never goes out (ASR 45000081).
         watcher = asyncio.create_task(_stop_mic_when(stop, mic), name="yark-stop-mic")
-        send_task = asyncio.create_task(_pump_audio(mic, stt), name="yark-send")
+        send_task: asyncio.Task | None = None
         try:
-            async for response in stt.responses():
-                if on_partial:
-                    text = response.text()
-                    if text:
-                        on_partial(text)
-                for piece in committer.feed(response):
-                    logger.info("commit %r", piece)
-                    yield piece
+            async with stt_cm as stt_client:
+                send_task = asyncio.create_task(
+                    _pump_audio(mic, stt_client), name="yark-send"
+                )
+                async for response in stt_client.responses():
+                    if on_partial:
+                        text = response.text()
+                        if text:
+                            on_partial(text)
+                    for piece in committer.feed(response):
+                        logger.info("commit %r", piece)
+                        yield piece
         finally:
             if not stop.is_set():
                 stop.set()
-            for task in (watcher, send_task):
+            pending = [task for task in (watcher, send_task) if task is not None]
+            for task in pending:
                 if not task.done():
                     task.cancel()
-            for task in (watcher, send_task):
+            for task in pending:
                 try:
                     await task
                 except asyncio.CancelledError:
@@ -63,6 +73,7 @@ async def _pump_audio(mic: Microphone, stt: VolcengineStt) -> None:
         if sent_last:
             return
         sent_last = True
+        logger.debug("sending last audio packet bytes=%s", len(pending))
         await stt.send_audio(pending, last=True)
 
     try:

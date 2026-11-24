@@ -20,6 +20,21 @@ logger = logging.getLogger("yark.mic")
 _SENTINEL = object()
 
 
+def put_queue_end(queue: asyncio.Queue[object] | None, marker: object) -> None:
+    """Enqueue `marker`, dropping the oldest item if the bounded queue is full."""
+    if queue is None:
+        return
+    while True:
+        try:
+            queue.put_nowait(marker)
+            return
+        except asyncio.QueueFull:
+            try:
+                queue.get_nowait()
+            except asyncio.QueueEmpty:
+                return
+
+
 class Microphone:
     def __init__(self, audio: AudioConfig):
         self._audio = audio
@@ -85,11 +100,7 @@ class Microphone:
                 stream.close()
             except Exception:
                 logger.debug("mic stream close failed", exc_info=True)
-        if self._queue is not None:
-            try:
-                self._queue.put_nowait(_SENTINEL)
-            except asyncio.QueueFull:
-                pass
+        put_queue_end(self._queue, _SENTINEL)
 
     def _callback(self, indata, frames, time_info, status) -> None:  # noqa: ARG002
         if status:

@@ -144,15 +144,19 @@ class DictationRuntime:
         failed: BaseException | None = None
         llm_error: BaseException | None = None
         llm_action: str | None = None
+        pieces: list[str] = []
         try:
-            pieces: list[str] = []
-            pipeline = LlmPipeline(self.cfg.llm)
+            pipeline = LlmPipeline(self.cfg.llm, proxy=self.cfg.network.proxy)
             dictation_mode = self._session_mode
-            async for piece in transcribe_until(self.cfg, self._stop):
-                if pipeline.enabled(dictation_mode):
-                    pieces.append(piece)
-                else:
-                    inject_text(piece, self.mode)
+            try:
+                async for piece in transcribe_until(self.cfg, self._stop):
+                    if pipeline.enabled(dictation_mode):
+                        pieces.append(piece)
+                    else:
+                        inject_text(piece, self.mode)
+            except Exception as exc:
+                failed = exc
+                logger.exception("dictation session failed")
             if pieces:
                 raw = "".join(pieces)
                 text = await asyncio.to_thread(pipeline.apply, raw, dictation_mode)
@@ -170,7 +174,7 @@ class DictationRuntime:
                 beep()
         finally:
             self._set_listening(False)
-        if failed is not None:
+        if failed is not None and not pieces:
             self._notify_error(failed)
         elif llm_error is not None:
             self._notify_error(llm_error, action=llm_action)

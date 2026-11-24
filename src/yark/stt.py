@@ -43,7 +43,7 @@ class VolcengineStt:
     async def connect(self) -> None:
         headers = self._cfg.volcengine.auth_headers(self.request_id)
         url = self._cfg.volcengine.endpoint
-        proxy = proxy_for_url(url)
+        proxy = proxy_for_url(url, mode=self._cfg.network.proxy)
         if proxy:
             logger.info(
                 "connecting %s request_id=%s via proxy %s",

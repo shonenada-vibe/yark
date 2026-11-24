@@ -15,6 +15,7 @@ from pathlib import Path
 
 from yark.errors import YarkError
 from yark.hotkey import HoldMachine, expand_tokens
+from yark.mic import put_queue_end
 
 logger = logging.getLogger("yark.winbridge")
 
@@ -291,11 +292,7 @@ class WinMicrophone:
                 await reader
             except (asyncio.CancelledError, Exception):
                 pass
-        if self._queue is not None:
-            try:
-                self._queue.put_nowait(_SENTINEL)
-            except asyncio.QueueFull:
-                pass
+        put_queue_end(self._queue, _SENTINEL)
 
     async def _read(self) -> None:
         proc = self._proc
@@ -330,11 +327,7 @@ class WinMicrophone:
         except Exception:
             logger.exception("Windows microphone helper failed")
         finally:
-            if self._queue is not None:
-                try:
-                    self._queue.put_nowait(_SENTINEL)
-                except asyncio.QueueFull:
-                    pass
+            put_queue_end(self._queue, _SENTINEL)
 
 
 def linux_mic_available() -> bool:

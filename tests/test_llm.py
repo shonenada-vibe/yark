@@ -1,7 +1,11 @@
+import json
+import ssl
+
 from yark.config import LlmConfig, LlmFeatureConfig
 from yark.llm import (
     DEFAULT_USER_AGENT,
     ChatRequest,
+    HttpCompleter,
     LlmPipeline,
     chat_completions_body,
     chat_completions_url,
@@ -109,3 +113,40 @@ def test_llm_error_keeps_original_text():
     assert len(fake.calls) == 1
     assert isinstance(pipe.last_error, RuntimeError)
     assert pipe.last_error_action == "translate"
+
+
+def test_http_completer_retries_ssl_eof(monkeypatch):
+    payload = json.dumps(
+        {"choices": [{"message": {"content": "translated"}}]}
+    ).encode("utf-8")
+    calls = {"n": 0}
+
+    class FakeResp:
+        def read(self):
+            return payload
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            return False
+
+    def fake_urlopen(req, timeout=None, proxy="direct"):
+        calls["n"] += 1
+        if calls["n"] < 3:
+            raise ssl.SSLEOFError(8, "EOF occurred in violation of protocol")
+        return FakeResp()
+
+    monkeypatch.setattr("yark.llm._urlopen", fake_urlopen)
+    monkeypatch.setattr("yark.llm.time.sleep", lambda _delay: None)
+    text = HttpCompleter().complete(
+        ChatRequest(
+            base_url="https://api.example.com/v1",
+            api_key="sk",
+            model="m",
+            prompt="p",
+            text="你好",
+        )
+    )
+    assert text == "translated"
+    assert calls["n"] == 3

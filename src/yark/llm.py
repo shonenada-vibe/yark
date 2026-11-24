@@ -5,6 +5,8 @@ from __future__ import annotations
 import json
 import logging
 import os
+import ssl
+import time
 import urllib.error
 import urllib.request
 from dataclasses import dataclass
@@ -23,6 +25,8 @@ DEFAULT_USER_AGENT = (
     "AppleWebKit/537.36 (KHTML, like Gecko) "
     "Chrome/131.0.0.0 Safari/537.36"
 )
+LLM_RETRY_ATTEMPTS = 3
+LLM_RETRY_BACKOFF = 0.4
 
 
 @dataclass(frozen=True)
@@ -88,26 +92,71 @@ def parse_chat_content(payload: dict) -> str:
     return text
 
 
-def _urlopen(req: urllib.request.Request, timeout: float):
+def _urlopen(req: urllib.request.Request, timeout: float, proxy: str = "direct"):
     url = req.full_url
-    proxy = proxy_for_url(url)
-    if proxy:
-        logger.info("LLM via proxy %s", redact_proxy(proxy))
-        opener = urllib.request.build_opener(
-            urllib.request.ProxyHandler({"http": proxy, "https": proxy})
-        )
-        return opener.open(req, timeout=timeout)
-    return urllib.request.urlopen(req, timeout=timeout)
+    proxy_url = proxy_for_url(url, mode=proxy)
+    if proxy_url:
+        logger.info("LLM via proxy %s", redact_proxy(proxy_url))
+        handler = urllib.request.ProxyHandler({"http": proxy_url, "https": proxy_url})
+    else:
+        # Empty handler disables HTTPS_PROXY picked up by urllib.getproxies().
+        handler = urllib.request.ProxyHandler({})
+    opener = urllib.request.build_opener(handler)
+    return opener.open(req, timeout=timeout)
+
+
+_RETRYABLE_HTTP = {408, 425, 429, 500, 502, 503, 504}
+
+
+def _retryable_llm_error(exc: BaseException) -> bool:
+    if isinstance(exc, urllib.error.HTTPError):
+        return exc.code in _RETRYABLE_HTTP
+    if isinstance(exc, RuntimeError):
+        text = str(exc)
+        if text.startswith("LLM HTTP "):
+            try:
+                code = int(text.split()[2].rstrip(":"))
+            except (IndexError, ValueError):
+                return False
+            return code in _RETRYABLE_HTTP
+        return False
+    if isinstance(exc, ssl.SSLError):
+        return True
+    if isinstance(exc, urllib.error.URLError):
+        return True
+    return isinstance(exc, (TimeoutError, ConnectionError, BrokenPipeError, OSError))
 
 
 class HttpCompleter:
+    def __init__(self, proxy: str = "direct"):
+        self._proxy = proxy
+
     def complete(self, request: ChatRequest) -> str:
+        delay = LLM_RETRY_BACKOFF
+        for attempt in range(1, LLM_RETRY_ATTEMPTS + 1):
+            try:
+                return self._complete_once(request)
+            except Exception as exc:
+                if attempt >= LLM_RETRY_ATTEMPTS or not _retryable_llm_error(exc):
+                    raise
+                logger.warning(
+                    "LLM request failed (%s); retry %s/%s in %.1fs",
+                    exc,
+                    attempt,
+                    LLM_RETRY_ATTEMPTS - 1,
+                    delay,
+                )
+                time.sleep(delay)
+                delay *= 2
+        raise RuntimeError("LLM request failed")
+
+    def _complete_once(self, request: ChatRequest) -> str:
         url = chat_completions_url(request.base_url)
         body = json.dumps(chat_completions_body(request)).encode("utf-8")
         headers = llm_http_headers(request.api_key)
         req = urllib.request.Request(url, data=body, headers=headers, method="POST")
         try:
-            with _urlopen(req, timeout=request.timeout) as resp:
+            with _urlopen(req, timeout=request.timeout, proxy=self._proxy) as resp:
                 raw = resp.read().decode("utf-8")
         except urllib.error.HTTPError as exc:
             detail = exc.read().decode("utf-8", errors="replace")[:500]
@@ -121,9 +170,15 @@ class HttpCompleter:
 class LlmPipeline:
     """Apply enabled refine then translate steps. Failures leave text unchanged."""
 
-    def __init__(self, cfg: LlmConfig, completer: Completer | None = None):
+    def __init__(
+        self,
+        cfg: LlmConfig,
+        completer: Completer | None = None,
+        *,
+        proxy: str = "direct",
+    ):
         self._cfg = cfg
-        self._completer = completer or HttpCompleter()
+        self._completer = completer or HttpCompleter(proxy)
         self.last_error: BaseException | None = None
         self.last_error_action: str | None = None
 

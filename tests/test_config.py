@@ -151,6 +151,15 @@ prompt = "to french"
     assert cfg.llm.feature_key(cfg.llm.translate) == "shared-key"
 
 
+def test_network_proxy_from_toml_and_env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    monkeypatch.delenv("YARK_PROXY", raising=False)
+    path = tmp_path / "config.toml"
+    path.write_text('[network]\nproxy = "env"\n', encoding="utf-8")
+    assert load_config(path).network.proxy == "env"
+    monkeypatch.setenv("YARK_PROXY", "direct")
+    assert load_config(path).network.proxy == "direct"
+
+
 def test_save_llm_config_roundtrip(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     for key in ("YARK_LLM_API_KEY", "OPENAI_API_KEY"):
         monkeypatch.delenv(key, raising=False)

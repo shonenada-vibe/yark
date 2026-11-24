@@ -44,6 +44,12 @@ inject = "unicode"
 # Windows/WSL: option=Alt, command=Win, control=Ctrl. unicode is treated as paste.
 beep = true
 
+[network]
+# direct = ignore HTTPS_PROXY / system proxy (default)
+# env    = honor HTTPS_PROXY / HTTP_PROXY / ALL_PROXY
+# or a proxy URL: "http://127.0.0.1:7890"
+proxy = "direct"
+
 [stt]
 enable_itn = true
 enable_punc = true

@@ -136,12 +136,19 @@ class LlmConfig:
 
 
 @dataclass(frozen=True)
+class NetworkConfig:
+    # direct = ignore HTTPS_PROXY; env = honor it; otherwise a proxy URL.
+    proxy: str = "direct"
+
+
+@dataclass(frozen=True)
 class AppConfig:
     volcengine: VolcengineConfig = field(default_factory=VolcengineConfig)
     audio: AudioConfig = field(default_factory=AudioConfig)
     input: InputConfig = field(default_factory=InputConfig)
     stt: SttConfig = field(default_factory=SttConfig)
     llm: LlmConfig = field(default_factory=LlmConfig)
+    network: NetworkConfig = field(default_factory=NetworkConfig)
     path: Path | None = None
 
 
@@ -164,6 +171,7 @@ def load_config(path: Path | None = None) -> AppConfig:
     llm_data = data.get("llm") or {}
     refine = llm_data.get("refine") or {}
     translate = llm_data.get("translate") or {}
+    net = data.get("network") or {}
 
     cfg = AppConfig(
         volcengine=VolcengineConfig(
@@ -204,6 +212,7 @@ def load_config(path: Path | None = None) -> AppConfig:
             refine=_feature_from_table(refine, DEFAULT_REFINE_PROMPT),
             translate=_feature_from_table(translate, DEFAULT_TRANSLATE_PROMPT),
         ),
+        network=NetworkConfig(proxy=str(net.get("proxy") or "direct")),
         path=used,
     )
     return _apply_env(cfg)
@@ -239,6 +248,7 @@ def _apply_env(cfg: AppConfig) -> AppConfig:
     llm_key = os.environ.get("YARK_LLM_API_KEY") or os.environ.get("OPENAI_API_KEY")
     llm_base = os.environ.get("YARK_LLM_BASE_URL") or os.environ.get("OPENAI_BASE_URL")
     llm_model = os.environ.get("YARK_LLM_MODEL")
+    yark_proxy = os.environ.get("YARK_PROXY")
 
     volc = cfg.volcengine
     updates = {}
@@ -276,7 +286,11 @@ def _apply_env(cfg: AppConfig) -> AppConfig:
     if llm_updates:
         llm = replace(llm, **llm_updates)
 
-    return replace(cfg, volcengine=volc, input=inp, llm=llm)
+    network = cfg.network
+    if yark_proxy is not None and yark_proxy.strip():
+        network = replace(network, proxy=yark_proxy.strip())
+
+    return replace(cfg, volcengine=volc, input=inp, llm=llm, network=network)
 
 
 _EXAMPLE_TOML = """\
@@ -319,6 +333,12 @@ hotkey_translate = "command+option"
 hotkey_refine = "command+shift+option"
 inject = "unicode"
 beep = true
+
+[network]
+# direct = ignore HTTPS_PROXY / system proxy (default)
+# env    = honor HTTPS_PROXY / HTTP_PROXY / ALL_PROXY
+# or a proxy URL: "http://127.0.0.1:7890"
+proxy = "direct"
 
 [stt]
 enable_itn = true
