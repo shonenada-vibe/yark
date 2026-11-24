@@ -321,7 +321,16 @@ class WinMicrophone:
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.STDOUT,
         )
-        self._reader = asyncio.create_task(self._read(), name="yark-win-mic")
+        ready = asyncio.get_running_loop().create_future()
+        self._reader = asyncio.create_task(self._read(ready), name="yark-win-mic")
+        try:
+            await asyncio.wait_for(ready, timeout=8)
+        except TimeoutError as exc:
+            await self.stop()
+            raise YarkError("Windows microphone did not produce audio within 8 seconds") from exc
+        except (YarkError, asyncio.CancelledError):
+            await self.stop()
+            raise
 
     async def chunks(self) -> AsyncIterator[bytes]:
         if self._queue is None:
@@ -360,7 +369,7 @@ class WinMicrophone:
                 pass
         put_queue_end(self._queue, _SENTINEL)
 
-    async def _read(self) -> None:
+    async def _read(self, ready: asyncio.Future[None]) -> None:
         proc = self._proc
         if proc is None or proc.stdout is None:
             return
@@ -374,6 +383,10 @@ class WinMicrophone:
                 if not text.startswith("YARK pcm "):
                     if text.startswith("YARK mic started"):
                         logger.debug("%s", text)
+                    elif text.startswith("YARK mic error ") and not ready.done():
+                        detail = text.removeprefix("YARK mic error ")
+                        ready.set_exception(YarkError(f"Cannot open Windows microphone: {detail}"))
+                        break
                     elif text:
                         logger.warning("Windows microphone helper: %s", text)
                     continue
@@ -387,6 +400,8 @@ class WinMicrophone:
                             "Windows microphone received first PCM chunk (%s bytes)", len(pcm)
                         )
                         received_audio = True
+                        if not ready.done():
+                            ready.set_result(None)
                     try:
                         self._queue.put_nowait(pcm)
                     except asyncio.QueueFull:
@@ -405,6 +420,8 @@ class WinMicrophone:
         except Exception:
             logger.exception("Windows microphone helper failed")
         finally:
+            if not ready.done():
+                ready.set_exception(YarkError("Windows microphone helper exited without audio"))
             put_queue_end(self._queue, _SENTINEL)
 
 

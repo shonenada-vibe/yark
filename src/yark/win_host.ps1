@@ -154,6 +154,7 @@ Add-Type @"
 using System;
 using System.Collections.Generic;
 using System.Runtime.InteropServices;
+using System.Text;
 
 public class YarkWaveIn {
     const uint WAVE_MAPPER = 0xFFFFFFFF;
@@ -186,6 +187,9 @@ public class YarkWaveIn {
     delegate void WaveInProc(IntPtr hwi, int uMsg, IntPtr dwInstance, IntPtr dwParam1, IntPtr dwParam2);
 
     [DllImport("winmm.dll")] static extern int waveInOpen(out IntPtr ph, uint id, ref WAVEFORMATEX fmt, WaveInProc cb, IntPtr inst, uint flags);
+    [DllImport("winmm.dll")] static extern uint waveInGetNumDevs();
+    [DllImport("winmm.dll", CharSet = CharSet.Unicode)]
+    static extern int waveInGetErrorText(int error, StringBuilder text, uint length);
     [DllImport("winmm.dll")] static extern int waveInPrepareHeader(IntPtr h, IntPtr hdr, int size);
     [DllImport("winmm.dll")] static extern int waveInUnprepareHeader(IntPtr h, IntPtr hdr, int size);
     [DllImport("winmm.dll")] static extern int waveInAddBuffer(IntPtr h, IntPtr hdr, int size);
@@ -214,7 +218,12 @@ public class YarkWaveIn {
         fmt.nAvgBytesPerSec = rate * 2;
         fmt.cbSize = 0;
         int err = waveInOpen(out handle, WAVE_MAPPER, ref fmt, proc, IntPtr.Zero, CALLBACK_FUNCTION);
-        if (err != 0) throw new Exception("waveInOpen failed " + err);
+        if (err != 0) {
+            var detail = new StringBuilder(256);
+            waveInGetErrorText(err, detail, (uint)detail.Capacity);
+            throw new Exception("waveInOpen failed " + err + " (" + detail + "; " +
+                waveInGetNumDevs() + " Windows recording devices)");
+        }
         pins = new GCHandle[2];
         hdrs = new IntPtr[2];
         for (int i = 0; i < 2; i++) {
@@ -290,6 +299,11 @@ try {
             Start-Sleep -Milliseconds 10
         }
     }
+}
+catch {
+    [Console]::Error.WriteLine("YARK mic error " + $_.Exception.GetBaseException().Message)
+    [Console]::Error.Flush()
+    exit 1
 }
 finally {
     $mic.Stop()

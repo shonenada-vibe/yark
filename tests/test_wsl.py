@@ -1,10 +1,16 @@
+import asyncio
 import os
 import subprocess
 import sys
 import threading
 
+import pytest
+
 from yark import winbridge
+from yark.config import AppConfig
+from yark.errors import YarkError
 from yark.hotkey import parse_hotkey
+from yark.session import transcribe_until
 from yark.winbridge import host_script_path, parse_keys_line, running_in_wsl
 
 
@@ -67,6 +73,51 @@ assert not sys.stdin.read()
         assert quit_requested.wait(timeout=2)
     finally:
         tray.stop()
+
+
+def test_windows_mic_open_failure_prevents_asr_connection(monkeypatch):
+    spawn = asyncio.create_subprocess_exec
+
+    async def spawn_mic(*args, **kwargs):
+        script = "import sys; print('YARK mic error waveInOpen failed 1'); sys.exit(1)"
+        return await spawn(sys.executable, "-c", script, **kwargs)
+
+    class UnexpectedAsr:
+        async def __aenter__(self):
+            pytest.fail("ASR connected despite Windows microphone startup failure")
+
+        async def __aexit__(self, *_args):
+            pass
+
+    async def run():
+        mic = winbridge.WinMicrophone()
+        with pytest.raises(YarkError, match="waveInOpen failed 1"):
+            async for _ in transcribe_until(
+                AppConfig(), asyncio.Event(), microphone=mic, stt=UnexpectedAsr()
+            ):
+                pass
+
+    monkeypatch.setattr(winbridge, "_powershell_base", lambda: ["powershell.exe"])
+    monkeypatch.setattr(winbridge, "windows_path", str)
+    monkeypatch.setattr(winbridge.asyncio, "create_subprocess_exec", spawn_mic)
+    asyncio.run(run())
+
+
+def test_windows_mic_keeps_first_pcm_chunk_after_startup(monkeypatch):
+    spawn = asyncio.create_subprocess_exec
+
+    async def spawn_mic(*args, **kwargs):
+        script = "print('YARK pcm AQI=', flush=True)"
+        return await spawn(sys.executable, "-c", script, **kwargs)
+
+    async def run():
+        async with winbridge.WinMicrophone() as mic:
+            assert [chunk async for chunk in mic.chunks()] == [b"\x01\x02"]
+
+    monkeypatch.setattr(winbridge, "_powershell_base", lambda: ["powershell.exe"])
+    monkeypatch.setattr(winbridge, "windows_path", str)
+    monkeypatch.setattr(winbridge.asyncio, "create_subprocess_exec", spawn_mic)
+    asyncio.run(run())
 
 
 def test_running_in_wsl_false_outside_wsl(monkeypatch):
